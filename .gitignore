@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+web-app/node_modules/
+
+# Next.js
+.next/
+web-app/.next/
+out/
+web-app/out/
+
+# builds
+dist/
+build/
+web-app/dist/
+web-app/build/
+
+# local env files and secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+web-app/.env
+web-app/.env.*
+!web-app/.env.example
+!web-app/.env.local.example
+
+# OS/editor noise
+.DS_Store
+*.swp
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# TypeScript
+*.tsbuildinfo
+web-app/next-env.d.ts
