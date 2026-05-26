@@ -54,7 +54,7 @@
         seen.add(el);
 
         const text = cleanText(el.textContent || "");
-        if (isLikelyJobTitle(text) && isLikelyJobArea(el, text)) return el;
+        if (isLikelyJobTitle(text)) return el;
       }
     }
 
@@ -77,8 +77,6 @@
   }
 
   function findDetailsRoot(titleEl) {
-    if (!titleEl) return null;
-
     const selectors = [
       ".jobs-search__job-details--container",
       ".jobs-search__job-details",
@@ -89,16 +87,27 @@
       "main",
     ];
 
+    if (titleEl) {
+      for (const selector of selectors) {
+        const root = titleEl.closest(selector);
+        if (root && isVisible(root)) return root;
+      }
+    }
+
     for (const selector of selectors) {
-      const root = titleEl.closest(selector);
-      if (root && isVisible(root)) return root;
+      const roots = Array.from(document.querySelectorAll(selector));
+      const root = roots.find((candidate) => {
+        const text = cleanText(candidate.innerText || candidate.textContent || "");
+        return isVisible(candidate) && /\b(easy apply|apply|save|about the job)\b/i.test(text);
+      });
+      if (root) return root;
     }
 
     return null;
   }
 
   function findHeaderRoot(titleEl, detailsRoot) {
-    if (!titleEl) return null;
+    if (!titleEl) return findHeaderRootFromDetails(detailsRoot);
 
     const title = cleanText(titleEl.textContent || "");
     let best = titleEl.parentElement;
@@ -132,7 +141,27 @@
     return best;
   }
 
+  function findHeaderRootFromDetails(detailsRoot) {
+    if (!detailsRoot) return null;
+
+    const selectors = [
+      ".job-details-jobs-unified-top-card",
+      ".jobs-unified-top-card",
+      ".jobs-details-top-card",
+    ];
+
+    for (const selector of selectors) {
+      const root = Array.from(detailsRoot.querySelectorAll(selector)).find(isVisible);
+      if (root) return root;
+    }
+
+    return detailsRoot;
+  }
+
   function companyFromHeader(root, lines, rawTitle) {
+    const selectorCompany = companyFromSelectors(root, rawTitle);
+    if (selectorCompany) return selectorCompany;
+
     const anchorCompany = companyFromAnchor(root, rawTitle);
     if (anchorCompany) return anchorCompany;
 
@@ -147,6 +176,29 @@
     for (const line of candidates) {
       const company = cleanCompanyLine(line, rawTitle);
       if (company) return company;
+    }
+
+    return "";
+  }
+
+  function companyFromSelectors(root, rawTitle) {
+    if (!root) return "";
+
+    const selectors = [
+      ".job-details-jobs-unified-top-card__company-name a",
+      ".job-details-jobs-unified-top-card__company-name",
+      ".jobs-unified-top-card__company-name a",
+      ".jobs-unified-top-card__company-name",
+      ".jobs-details-top-card__company-url",
+      "a[href*='/company/']",
+    ];
+
+    for (const selector of selectors) {
+      for (const el of root.querySelectorAll(selector)) {
+        if (!isVisible(el)) continue;
+        const company = cleanCompanyLine(el.innerText || el.textContent || "", rawTitle);
+        if (company) return company;
+      }
     }
 
     return "";
@@ -344,7 +396,17 @@
 
     cards.push(
       ...document.querySelectorAll(
-        ".job-card-container--clickable[aria-current='page'], .jobs-search-results__list-item--active, .job-card-container--active",
+        [
+          "[data-job-id][aria-current='page']",
+          "[data-job-id][aria-selected='true']",
+          "li[aria-current='page']",
+          "li[aria-selected='true']",
+          ".job-card-container--clickable[aria-current='page']",
+          ".jobs-search-results__list-item--active",
+          ".jobs-search-results-list__list-item--active",
+          ".scaffold-layout__list-item--active",
+          ".job-card-container--active",
+        ].join(", "),
       ),
     );
 
@@ -366,11 +428,15 @@
 
   function findTitleLineIndex(lines, rawTitle) {
     const title = cleanText(rawTitle);
-    if (!title) return -1;
-    return lines.findIndex((line) => {
-      const current = cleanText(line);
-      return current === title || current.includes(title) || title.includes(current);
-    });
+    if (title) {
+      const index = lines.findIndex((line) => {
+        const current = cleanText(line);
+        return current === title || current.includes(title) || title.includes(current);
+      });
+      if (index !== -1) return index;
+    }
+
+    return lines.findIndex(isLikelyJobTitle);
   }
 
   function jobIdFromUrl() {

@@ -96,7 +96,7 @@ async function handleJobPage(tab) {
   const job = results?.[0]?.result;
   if (!job || (!job.jobTitle && !job.company)) {
     throw new Error(
-      "Couldn't find the LinkedIn job-details panel.\nClick a job in the list so the right pane shows it, then click Find Referral again.",
+      "Couldn't read the selected LinkedIn job.\nRefresh LinkedIn, click the job once so its details are visible, then click Find Referral again.",
     );
   }
 
