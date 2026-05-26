@@ -1,25 +1,35 @@
 // content.js — executed inside a LinkedIn jobs tab via chrome.scripting.
 //
-// Keep extraction anchored to the visible selected job header. If a field cannot
-// be read from the job header or description, leave it blank instead of pulling
+// Extract only from the selected job details pane and selected job card.
+// If LinkedIn changes a selector, leave the field blank before trusting
 // unrelated profile/sidebar text.
 
 (() => {
   function extractJob() {
-    const description = extractDescription();
     const titleEl = findVisibleJobTitleElement();
+    const detailsRoot = findDetailsRoot(titleEl);
+    const description = extractDescription(detailsRoot || document);
+    const selectedCardLines = getSelectedJobCardLines();
     const rawTitle =
       cleanText(titleEl?.textContent || "") ||
       titleFromDescription(description) ||
-      titleFromSelectedJobCard();
+      titleFromCardLines(selectedCardLines);
     const jobTitle = cleanJobTitle(rawTitle);
-    const headerRoot = findHeaderRoot(titleEl);
+    const headerRoot = findHeaderRoot(titleEl, detailsRoot);
     const headerLines = cleanLines(headerRoot?.innerText || headerRoot?.textContent || "");
 
     return {
       jobTitle: jobTitle.slice(0, 200),
-      company: extractCompany(headerRoot, headerLines, rawTitle).slice(0, 200),
-      location: extractLocation(headerLines, rawTitle, description).slice(0, 200),
+      company: (
+        companyFromHeader(headerRoot, headerLines, rawTitle) ||
+        companyFromCardLines(selectedCardLines, rawTitle) ||
+        companyFromDescription(description)
+      ).slice(0, 200),
+      location: (
+        locationFromHeader(headerLines, rawTitle) ||
+        locationFromCardLines(selectedCardLines, rawTitle) ||
+        locationFromDescription(description)
+      ).slice(0, 200),
       jobUrl: canonicalJobUrl(),
       jobDescription: description,
     };
@@ -44,84 +54,102 @@
         seen.add(el);
 
         const text = cleanText(el.textContent || "");
-        if (isLikelyJobTitle(text) && isInLikelyJobHeader(el, text)) return el;
+        if (isLikelyJobTitle(text) && isLikelyJobArea(el, text)) return el;
       }
     }
 
     return null;
   }
 
-  function isInLikelyJobHeader(el, title) {
+  function isLikelyJobArea(el, title) {
     let node = el.parentElement;
-    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+    for (let depth = 0; node && depth < 10; depth += 1, node = node.parentElement) {
       const text = cleanText(node.innerText || node.textContent || "");
       if (!text.includes(title)) continue;
-      if (/\b(easy apply|apply|save|promoted by hirer|applicants?)\b/i.test(text)) {
-        return true;
-      }
-      if (node.matches?.(".jobs-details, .job-view-layout, .scaffold-layout__detail")) {
+      if (
+        /\b(easy apply|apply|save|promoted by hirer|applicants?|about the job)\b/i.test(text) ||
+        node.matches?.(".jobs-details, .job-view-layout, .scaffold-layout__detail")
+      ) {
         return true;
       }
     }
     return false;
   }
 
-  function findHeaderRoot(titleEl) {
+  function findDetailsRoot(titleEl) {
+    if (!titleEl) return null;
+
+    const selectors = [
+      ".jobs-search__job-details--container",
+      ".jobs-search__job-details",
+      ".jobs-details",
+      ".jobs-details__main-content",
+      ".scaffold-layout__detail",
+      ".job-view-layout",
+      "main",
+    ];
+
+    for (const selector of selectors) {
+      const root = titleEl.closest(selector);
+      if (root && isVisible(root)) return root;
+    }
+
+    return null;
+  }
+
+  function findHeaderRoot(titleEl, detailsRoot) {
     if (!titleEl) return null;
 
     const title = cleanText(titleEl.textContent || "");
     let best = titleEl.parentElement;
     let node = titleEl.parentElement;
 
-    for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+    for (let depth = 0; node && depth < 10; depth += 1, node = node.parentElement) {
       if (!isVisible(node)) continue;
-
       const text = node.innerText || node.textContent || "";
       const normalized = cleanText(text);
       if (!normalized.includes(title)) continue;
-      if (/about the job/i.test(normalized) && normalized.length > 1600) break;
+      if (/about the job/i.test(normalized) && normalized.length > 1800) break;
 
       const lines = cleanLines(text);
       const titleIndex = findTitleLineIndex(lines, title);
-      const hasNearbyCompany =
-        titleIndex > 0 &&
-        lines
-          .slice(Math.max(0, titleIndex - 4), titleIndex)
-          .some((line) => isLikelyCompanyLine(line, title));
-      const hasNearbyLocation =
-        titleIndex !== -1 &&
-        lines
-          .slice(titleIndex + 1, titleIndex + 6)
-          .some((line) => Boolean(locationFromLine(line)));
+      const hasUsefulHeaderInfo =
+        lines.some((line) => isLikelyCompanyLine(line, title)) ||
+        lines.some((line) => Boolean(locationFromLine(line))) ||
+        /\b(easy apply|apply|save|applicants?)\b/i.test(normalized);
 
-      if (
-        lines.length >= 2 &&
-        lines.length <= 35 &&
-        normalized.length <= 2200 &&
-        (hasNearbyCompany || hasNearbyLocation || /\b(easy apply|apply|save)\b/i.test(normalized))
-      ) {
+      if (lines.length >= 2 && lines.length <= 40 && normalized.length <= 2400 && hasUsefulHeaderInfo) {
         best = node;
       }
 
-      if (hasNearbyCompany && hasNearbyLocation && lines.length <= 20) {
+      if (titleIndex !== -1 && hasUsefulHeaderInfo && lines.length <= 24) {
         return node;
       }
+
+      if (detailsRoot && node === detailsRoot) break;
     }
 
     return best;
   }
 
-  function extractCompany(headerRoot, lines, rawTitle) {
-    const anchorCompany = companyFromAnchor(headerRoot, rawTitle);
+  function companyFromHeader(root, lines, rawTitle) {
+    const anchorCompany = companyFromAnchor(root, rawTitle);
     if (anchorCompany) return anchorCompany;
 
     const titleIndex = findTitleLineIndex(lines, rawTitle);
-    for (let index = titleIndex - 1; index >= Math.max(0, titleIndex - 4); index -= 1) {
-      const company = cleanCompanyLine(lines[index], rawTitle);
+    if (titleIndex === -1) return "";
+
+    const candidates = [
+      ...lines.slice(Math.max(0, titleIndex - 5), titleIndex).reverse(),
+      ...lines.slice(titleIndex + 1, titleIndex + 5),
+    ];
+
+    for (const line of candidates) {
+      const company = cleanCompanyLine(line, rawTitle);
       if (company) return company;
     }
 
-    return companyFromDescription(extractDescription());
+    return "";
   }
 
   function companyFromAnchor(root, rawTitle) {
@@ -131,6 +159,18 @@
     for (const anchor of anchors) {
       if (!isVisible(anchor)) continue;
       const company = cleanCompanyLine(anchor.innerText || anchor.textContent || "", rawTitle);
+      if (company) return company;
+    }
+
+    return "";
+  }
+
+  function companyFromCardLines(lines, rawTitle) {
+    const titleIndex = findTitleLineIndex(lines, rawTitle);
+    if (titleIndex === -1) return "";
+
+    for (let index = titleIndex + 1; index < Math.min(lines.length, titleIndex + 5); index += 1) {
+      const company = cleanCompanyLine(lines[index], rawTitle);
       if (company) return company;
     }
 
@@ -161,28 +201,40 @@
     if (!text || text.length > 90) return false;
     if (rawTitle && cleanText(rawTitle) === text) return false;
     if (isLikelyJobTitle(text) || locationFromLine(text) || isNoiseLine(text)) return false;
-    if (/\b(employees?|connections?|applicants?|benefits?|premium|open to full-time roles)\b/i.test(text)) {
+    if (/\b(employees?|connections?|applicants?|benefits?|premium|open to full-time roles|viewed|easy apply)\b/i.test(text)) {
       return false;
     }
     return /[a-zA-Z]/.test(text);
   }
 
-  function extractLocation(lines, rawTitle, description) {
+  function locationFromHeader(lines, rawTitle) {
     const titleIndex = findTitleLineIndex(lines, rawTitle);
-    if (titleIndex !== -1) {
-      for (let index = titleIndex + 1; index < Math.min(lines.length, titleIndex + 7); index += 1) {
-        const location = locationFromLine(lines[index]);
-        if (location) return location;
-      }
+    if (titleIndex === -1) return "";
+
+    for (let index = titleIndex + 1; index < Math.min(lines.length, titleIndex + 8); index += 1) {
+      const location = locationFromLine(lines[index]);
+      if (location) return location;
     }
 
-    return locationFromDescription(description);
+    return "";
+  }
+
+  function locationFromCardLines(lines, rawTitle) {
+    const titleIndex = findTitleLineIndex(lines, rawTitle);
+    if (titleIndex === -1) return "";
+
+    for (let index = titleIndex + 1; index < Math.min(lines.length, titleIndex + 6); index += 1) {
+      const location = locationFromLine(lines[index]);
+      if (location) return location;
+    }
+
+    return "";
   }
 
   function locationFromLine(line) {
     const first = cleanText(line).split(/[·•]/)[0].trim();
     if (!first || first.length > 90 || isNoiseLine(first)) return "";
-    if (/\b(applicants?|employees?|connections?|promoted by|response insights?)\b/i.test(first)) {
+    if (/\b(applicants?|employees?|connections?|promoted by|response insights?|benefits?)\b/i.test(first)) {
       return "";
     }
     if (
@@ -194,61 +246,131 @@
     return "";
   }
 
-  function extractDescription() {
+  function extractDescription(root) {
     const selectors = [
       "#job-details",
       ".jobs-description__content .jobs-box__html-content",
       ".jobs-description-content__text",
       ".jobs-description__container",
+      ".jobs-description",
       ".description__text",
+      "[class*='jobs-description']",
     ];
+    const roots = root && root !== document ? [root, document] : [document];
 
-    for (const selector of selectors) {
-      const el = Array.from(document.querySelectorAll(selector)).find(isVisible);
-      const text = cleanText(el?.innerText || el?.textContent || "");
-      if (text) return text.slice(0, 6000);
+    for (const currentRoot of roots) {
+      for (const selector of selectors) {
+        const matches = Array.from(currentRoot.querySelectorAll(selector));
+        for (const el of matches) {
+          const text = cleanBlockText(el.innerText || el.textContent || "");
+          if (isLikelyDescription(text)) return text.slice(0, 6000);
+        }
+      }
+
+      const sectionText = descriptionFromAboutSection(
+        currentRoot.innerText || currentRoot.textContent || "",
+      );
+      if (sectionText) return sectionText.slice(0, 6000);
     }
 
     return "";
+  }
+
+  function descriptionFromAboutSection(text) {
+    const lines = cleanLines(text);
+    const aboutIndex = lines.findIndex((line) => /^about the job$/i.test(line));
+    if (aboutIndex === -1) return "";
+
+    const collected = [];
+    for (const line of lines.slice(aboutIndex + 1)) {
+      if (
+        /^(people you can reach out to|similar jobs|recommended jobs|jobs you may be interested in|job match|premium)$/i.test(
+          line,
+        )
+      ) {
+        break;
+      }
+      if (/^(show more|show less|report this job)$/i.test(line)) continue;
+      collected.push(line);
+    }
+
+    const textAfterHeading = cleanBlockText(collected.join("\n"));
+    return isLikelyDescription(textAfterHeading) ? textAfterHeading : "";
+  }
+
+  function isLikelyDescription(text) {
+    const value = cleanText(text);
+    if (value.length < 40) return false;
+    return !/^(premium|job match|people you can reach out to)/i.test(value);
   }
 
   function titleFromDescription(description) {
-    const match = description.match(/\b(?:job title|title)\s*:\s*([^\n.]+)/i);
-    return cleanText(match?.[1] || "");
+    return valueAfterLabel(description, "(?:job title|title)").replace(/^["']|["']$/g, "");
   }
 
   function companyFromDescription(description) {
-    const match = description.match(/\bcompany\s*:\s*([^\n.]+)/i);
-    return cleanText(match?.[1] || "");
+    return valueAfterLabel(description, "company");
   }
 
   function locationFromDescription(description) {
-    const match = description.match(/\blocation\s*:\s*([^\n]+)/i);
-    return cleanText((match?.[1] || "").split(/[–-]/)[0]);
+    return cleanText(valueAfterLabel(description, "location").split(/[–-]/)[0]);
   }
 
-  function titleFromSelectedJobCard() {
-    const id = jobIdFromUrl();
-    if (!id) return "";
+  function valueAfterLabel(text, labelPattern) {
+    const labels =
+      "(?:job title|title|company|location|job description|description|requirements?|responsibilities|qualifications)";
+    const match = text.match(new RegExp(`\\b${labelPattern}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*${labels}\\s*:|\\b${labels}\\s*:|$)`, "i"));
+    return cleanText(match?.[1] || "");
+  }
 
-    const links = Array.from(
-      document.querySelectorAll(
-        `a[href*="/jobs/view/${id}"], a[href*="currentJobId=${id}"]`,
+  function getSelectedJobCardLines() {
+    const id = jobIdFromUrl();
+    const cards = [];
+
+    if (id) {
+      const links = Array.from(
+        document.querySelectorAll(
+          `a[href*="/jobs/view/${id}"], a[href*="currentJobId=${id}"]`,
+        ),
+      );
+
+      for (const link of links) {
+        const card = link.closest(
+          "[data-job-id], li, .job-card-container, .jobs-search-results__list-item",
+        );
+        if (card) cards.push(card);
+      }
+    }
+
+    cards.push(
+      ...document.querySelectorAll(
+        ".job-card-container--clickable[aria-current='page'], .jobs-search-results__list-item--active, .job-card-container--active",
       ),
     );
 
-    for (const link of links) {
-      const title = cleanLines(link.innerText || link.textContent || "").find(isLikelyJobTitle);
-      if (title) return title;
+    for (const card of cards) {
+      if (!isVisible(card)) continue;
+      const text = card.innerText || card.textContent || "";
+      const lines = cleanLines(text);
+      if (lines.length >= 2 && lines.length <= 25 && !lines.some((line) => /^about the job$/i.test(line))) {
+        return lines;
+      }
     }
 
-    return "";
+    return [];
+  }
+
+  function titleFromCardLines(lines) {
+    return lines.find(isLikelyJobTitle) || "";
   }
 
   function findTitleLineIndex(lines, rawTitle) {
     const title = cleanText(rawTitle);
     if (!title) return -1;
-    return lines.findIndex((line) => cleanText(line) === title || cleanText(line).includes(title));
+    return lines.findIndex((line) => {
+      const current = cleanText(line);
+      return current === title || current.includes(title) || title.includes(current);
+    });
   }
 
   function jobIdFromUrl() {
@@ -363,6 +485,10 @@
       .replace(/ /g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function cleanBlockText(text) {
+    return cleanLines(text).join("\n").trim();
   }
 
   function cleanLines(text) {

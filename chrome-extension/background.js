@@ -16,11 +16,20 @@ const LINKEDIN_PAGE_ACTION_URLS = [
   "https://linkedin.com/in/*",
 ];
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
 
   if (message.type === "LRA_OPEN_JOB") {
     openWebApp(message.job)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      );
+    return true;
+  }
+
+  if (message.type === "LRA_OPEN_CURRENT_JOB") {
+    openCurrentJobFromTab(sender.tab?.id)
       .then(() => sendResponse({ ok: true }))
       .catch((error) =>
         sendResponse({ ok: false, error: error?.message || String(error) }),
@@ -99,6 +108,23 @@ async function openWebApp(job) {
         .catch((error) => console.warn("job bridge inject failed", error));
     }
   });
+}
+
+async function openCurrentJobFromTab(tabId) {
+  if (!tabId) {
+    throw new Error("Couldn't read the active LinkedIn tab.");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content.js"],
+  });
+  const job = results?.[0]?.result;
+  if (!job || (!job.jobTitle && !job.company)) {
+    throw new Error("Couldn't read the selected LinkedIn job.");
+  }
+
+  await openWebApp(job);
 }
 
 function buildQueryParams(job) {
