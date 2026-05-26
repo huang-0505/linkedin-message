@@ -126,68 +126,231 @@
   }
 
   function extractJob() {
-    const detailPane = findDetailPane();
-    const topCard = findTopCard(detailPane);
+    return extractJobFromVisibleHeader();
+  }
 
-    function pickInside(root, selectors) {
-      if (!root) return "";
+  function extractJobFromVisibleHeader() {
+    const description = extractDescription();
+    const titleEl = findVisibleJobTitleElement();
+    const rawTitle =
+      cleanText(titleEl?.textContent || "") ||
+      titleFromDescription(description) ||
+      titleFromSelectedJobCard();
+    const jobTitle = cleanJobTitle(rawTitle);
+    const headerRoot = findHeaderRoot(titleEl);
+    const headerLines = cleanLines(headerRoot?.innerText || headerRoot?.textContent || "");
+
+    return {
+      jobTitle: jobTitle.slice(0, 200),
+      company: extractCompany(headerRoot, headerLines, rawTitle).slice(0, 200),
+      location: extractLocation(headerLines, rawTitle, description).slice(0, 200),
+      jobUrl: canonicalJobUrl(),
+      jobDescription: description,
+    };
+
+    function findVisibleJobTitleElement() {
+      const selectors = [
+        ".job-details-jobs-unified-top-card__job-title h1",
+        ".job-details-jobs-unified-top-card__job-title",
+        ".jobs-unified-top-card__job-title h1",
+        ".jobs-unified-top-card__job-title",
+        ".jobs-details-top-card__job-title h1",
+        ".jobs-details-top-card__job-title",
+        "main h1",
+        "h1",
+      ];
+      const seen = new Set();
+
       for (const selector of selectors) {
-        const el = root.querySelector(selector);
-        const text = cleanText(el?.textContent || "");
-        if (text) return text;
+        for (const el of document.querySelectorAll(selector)) {
+          if (seen.has(el) || !isVisible(el)) continue;
+          seen.add(el);
+
+          const text = cleanText(el.textContent || "");
+          if (isLikelyJobTitle(text) && isInLikelyJobHeader(el, text)) return el;
+        }
+      }
+
+      return null;
+    }
+
+    function isInLikelyJobHeader(el, title) {
+      let node = el.parentElement;
+      for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+        const text = cleanText(node.innerText || node.textContent || "");
+        if (!text.includes(title)) continue;
+        if (/\b(easy apply|apply|save|promoted by hirer|applicants?)\b/i.test(text)) {
+          return true;
+        }
+        if (node.matches?.(".jobs-details, .job-view-layout, .scaffold-layout__detail")) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function findHeaderRoot(titleEl) {
+      if (!titleEl) return null;
+
+      const title = cleanText(titleEl.textContent || "");
+      let best = titleEl.parentElement;
+      let node = titleEl.parentElement;
+
+      for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+        if (!isVisible(node)) continue;
+
+        const text = node.innerText || node.textContent || "";
+        const normalized = cleanText(text);
+        if (!normalized.includes(title)) continue;
+        if (/about the job/i.test(normalized) && normalized.length > 1600) break;
+
+        const lines = cleanLines(text);
+        const titleIndex = findTitleLineIndex(lines, title);
+        const hasNearbyCompany =
+          titleIndex > 0 &&
+          lines
+            .slice(Math.max(0, titleIndex - 4), titleIndex)
+            .some((line) => isLikelyCompanyLine(line, title));
+        const hasNearbyLocation =
+          titleIndex !== -1 &&
+          lines
+            .slice(titleIndex + 1, titleIndex + 6)
+            .some((line) => Boolean(locationFromLine(line)));
+
+        if (
+          lines.length >= 2 &&
+          lines.length <= 35 &&
+          normalized.length <= 2200 &&
+          (hasNearbyCompany || hasNearbyLocation || /\b(easy apply|apply|save)\b/i.test(normalized))
+        ) {
+          best = node;
+        }
+
+        if (hasNearbyCompany && hasNearbyLocation && lines.length <= 20) {
+          return node;
+        }
+      }
+
+      return best;
+    }
+
+    function extractCompany(headerRoot, lines, rawTitle) {
+      const anchorCompany = companyFromAnchor(headerRoot, rawTitle);
+      if (anchorCompany) return anchorCompany;
+
+      const titleIndex = findTitleLineIndex(lines, rawTitle);
+      for (let index = titleIndex - 1; index >= Math.max(0, titleIndex - 4); index -= 1) {
+        const company = cleanCompanyLine(lines[index], rawTitle);
+        if (company) return company;
+      }
+
+      return companyFromDescription(description);
+    }
+
+    function companyFromAnchor(root, rawTitle) {
+      if (!root) return "";
+      const anchors = Array.from(root.querySelectorAll("a[href*='/company/']"));
+
+      for (const anchor of anchors) {
+        if (!isVisible(anchor)) continue;
+        const company = cleanCompanyLine(anchor.innerText || anchor.textContent || "", rawTitle);
+        if (company) return company;
+      }
+
+      return "";
+    }
+
+    function cleanCompanyLine(line, rawTitle) {
+      const parts = cleanLines(line)
+        .flatMap((part) => part.split(/[·•]/))
+        .map(cleanText)
+        .filter(Boolean);
+
+      for (const part of parts) {
+        const cleaned = part
+          .replace(/\d{2,}\+?\s*employees?.*$/i, "")
+          .replace(/\d+\s+connections?.*$/i, "")
+          .replace(/\d+\s+company alumni.*$/i, "")
+          .trim();
+
+        if (isLikelyCompanyLine(cleaned, rawTitle)) return cleaned;
+      }
+
+      return "";
+    }
+
+    function isLikelyCompanyLine(line, rawTitle) {
+      const text = cleanText(line);
+      if (!text || text.length > 90) return false;
+      if (rawTitle && cleanText(rawTitle) === text) return false;
+      if (isLikelyJobTitle(text) || locationFromLine(text) || isNoiseLine(text)) return false;
+      if (/\b(employees?|connections?|applicants?|benefits?|premium|open to full-time roles)\b/i.test(text)) {
+        return false;
+      }
+      return /[a-zA-Z]/.test(text);
+    }
+
+    function extractLocation(lines, rawTitle, jobDescription) {
+      const titleIndex = findTitleLineIndex(lines, rawTitle);
+      if (titleIndex !== -1) {
+        for (let index = titleIndex + 1; index < Math.min(lines.length, titleIndex + 7); index += 1) {
+          const location = locationFromLine(lines[index]);
+          if (location) return location;
+        }
+      }
+
+      return locationFromDescription(jobDescription);
+    }
+
+    function locationFromLine(line) {
+      const first = cleanText(line).split(/[·•]/)[0].trim();
+      if (!first || first.length > 90 || isNoiseLine(first)) return "";
+      if (/\b(applicants?|employees?|connections?|promoted by|response insights?)\b/i.test(first)) {
+        return "";
+      }
+      if (
+        /,/.test(first) ||
+        /\b(remote|hybrid|on-site|onsite|united states|canada|greater .* area|area)\b/i.test(first)
+      ) {
+        return first;
       }
       return "";
     }
 
-    function panelLines() {
-      const topCardLines = cleanLines(topCard?.innerText || topCard?.textContent || "");
-      if (topCardLines.length >= 2) return topCardLines;
-      return cleanLines(detailPane?.innerText || detailPane?.textContent || "");
-    }
+    function extractDescription() {
+      const selectors = [
+        "#job-details",
+        ".jobs-description__content .jobs-box__html-content",
+        ".jobs-description-content__text",
+        ".jobs-description__container",
+        ".description__text",
+      ];
 
-    function isLocationLine(line) {
-      const first = line.split("·")[0].trim();
-      return (
-        line.includes("·") &&
-        (/,/.test(first) ||
-          /\b(remote|hybrid|united states|new york|san francisco)\b/i.test(first))
-      );
-    }
-
-    function isUiLine(line) {
-      return /^(apply|saved|save|remote|hybrid|full-time|part-time|contract|internship|yes|no)$/i.test(
-        line,
-      );
-    }
-
-    function jobIdFromUrl() {
-      try {
-        const url = new URL(window.location.href);
-        const currentJobId = url.searchParams.get("currentJobId");
-        if (currentJobId) return currentJobId;
-        const match = url.pathname.match(/\/jobs\/view\/(\d+)/);
-        return match?.[1] || "";
-      } catch (_) {
-        return "";
+      for (const selector of selectors) {
+        const el = Array.from(document.querySelectorAll(selector)).find(isVisible);
+        const text = cleanText(el?.innerText || el?.textContent || "");
+        if (text) return text.slice(0, 6000);
       }
+
+      return "";
     }
 
-    function isLikelyJobTitle(line) {
-      if (!line || isUiLine(line) || isLocationLine(line)) return false;
-      if (line.length < 4 || line.length > 140) return false;
-      if (/^(people you can reach out to|job match|premium|about the job)$/i.test(line)) {
-        return false;
-      }
-      return /\b(engineer|scientist|manager|specialist|analyst|developer|designer|intern|lead|director|product|data|software|machine learning|ai|ml|consultant|associate|architect)\b/i.test(
-        line,
-      );
+    function titleFromDescription(jobDescription) {
+      const match = jobDescription.match(/\b(?:job title|title)\s*:\s*([^\n.]+)/i);
+      return cleanText(match?.[1] || "");
     }
 
-    function titleFromLines(text) {
-      return cleanLines(text).find(isLikelyJobTitle) || "";
+    function companyFromDescription(jobDescription) {
+      const match = jobDescription.match(/\bcompany\s*:\s*([^\n.]+)/i);
+      return cleanText(match?.[1] || "");
     }
 
-    function extractTitleFromCurrentJobCard() {
+    function locationFromDescription(jobDescription) {
+      const match = jobDescription.match(/\blocation\s*:\s*([^\n]+)/i);
+      return cleanText((match?.[1] || "").split(/[–-]/)[0]);
+    }
+
+    function titleFromSelectedJobCard() {
       const id = jobIdFromUrl();
       if (!id) return "";
 
@@ -198,88 +361,43 @@
       );
 
       for (const link of links) {
-        const directText = titleFromLines(link.innerText || link.textContent || "");
-        if (directText) return directText;
-
-        const card = link.closest(
-          "[data-job-id], li, .job-card-container, .jobs-search-results__list-item",
-        );
-        const cardText = titleFromLines(card?.innerText || card?.textContent || "");
-        if (cardText) return cardText;
+        const title = cleanLines(link.innerText || link.textContent || "").find(isLikelyJobTitle);
+        if (title) return title;
       }
 
       return "";
     }
 
-    const titleSelectors = [
-      ".job-details-jobs-unified-top-card__job-title h1",
-      ".job-details-jobs-unified-top-card__job-title",
-      ".jobs-unified-top-card__job-title h1",
-      ".jobs-unified-top-card__job-title",
-      ".jobs-details-top-card__job-title h1",
-      ".jobs-details-top-card__job-title",
-      "h1.t-24",
-      "h1",
-    ];
-    const currentJobCardTitle = extractTitleFromCurrentJobCard();
-    const rawTitle =
-      pickInside(topCard, titleSelectors) || pickInside(detailPane, titleSelectors);
-    const fallbackTitle =
-      currentJobCardTitle ||
-      (isLikelyJobTitle(rawTitle) ? rawTitle : "") ||
-      panelLines().find(isLikelyJobTitle) ||
-      "";
-    const jobTitle = cleanJobTitle(fallbackTitle);
+    function findTitleLineIndex(lines, rawTitle) {
+      const title = cleanText(rawTitle);
+      if (!title) return -1;
+      return lines.findIndex((line) => cleanText(line) === title || cleanText(line).includes(title));
+    }
 
-    const companySelectors = [
-      ".job-details-jobs-unified-top-card__company-name a",
-      ".job-details-jobs-unified-top-card__company-name",
-      ".jobs-unified-top-card__company-name a",
-      ".jobs-unified-top-card__company-name",
-      "[class*='company-name'] a",
-      "[class*='company-name']",
-      "a[href*='/company/']",
-    ];
-    const company =
-      pickInside(topCard, companySelectors) || pickInside(detailPane, companySelectors);
+    function jobIdFromUrl() {
+      try {
+        const url = new URL(window.location.href);
+        const currentJobId = url.searchParams.get("currentJobId");
+        if (currentJobId) return currentJobId;
+        return url.pathname.match(/\/jobs\/view\/(\d+)/)?.[1] || "";
+      } catch (_) {
+        return "";
+      }
+    }
 
-    const locationContainer = pickVisible(
-      [
-        ".job-details-jobs-unified-top-card__primary-description-container",
-        ".job-details-jobs-unified-top-card__bullet",
-        ".jobs-unified-top-card__primary-description",
-        ".jobs-unified-top-card__bullet",
-        "[class*='primary-description']",
-        "[class*='top-card__bullet']",
-      ],
-      detailPane || topCard || document,
-    );
-    const locationText =
-      cleanText(locationContainer?.textContent || "") ||
-      panelLines().find(isLocationLine) ||
-      "";
-    const location = cleanText(locationText.split("·")[0]) || locationText;
+    function isLikelyJobTitle(line) {
+      const text = cleanText(line);
+      if (!text || text.length < 2 || text.length > 140 || isNoiseLine(text)) return false;
+      return /\b(engineer|scientist|manager|specialist|analyst|developer|designer|intern|lead|director|product|data|software|machine learning|ai|ml|consultant|associate|architect)\b/i.test(
+        text,
+      );
+    }
 
-    const descriptionEl =
-      pickVisible(
-        [
-          "#job-details",
-          ".jobs-description__content .jobs-box__html-content",
-          ".jobs-description-content__text",
-          ".jobs-description__container",
-          ".description__text",
-          "[class*='jobs-description']",
-        ],
-        detailPane || document,
-      ) || document.querySelector("#job-details");
-
-    return {
-      jobTitle: jobTitle.slice(0, 200),
-      company: company.slice(0, 200),
-      location: location.slice(0, 200),
-      jobUrl: canonicalJobUrl(),
-      jobDescription: cleanText(descriptionEl?.innerText || descriptionEl?.textContent || "").slice(0, 6000),
-    };
+    function isNoiseLine(line) {
+      return /^(apply|easy apply|saved|save|remote|hybrid|on-site|onsite|full-time|part-time|contract|internship|yes|no|premium|about the job|people you can reach out to|job match|show match details|tailor my resume|create cover letter)$/i.test(
+        cleanText(line),
+      );
+    }
   }
 
   function extractProfile() {
@@ -334,34 +452,6 @@
     };
   }
 
-  function findDetailPane() {
-    return pickVisible([
-      ".jobs-search__job-details--container",
-      ".jobs-search__job-details",
-      ".jobs-details",
-      ".jobs-details__main-content",
-      ".scaffold-layout__detail",
-      ".job-view-layout",
-      ".jobs-search-results-list + div",
-      "main",
-    ]);
-  }
-
-  function findTopCard(root) {
-    return (
-      pickVisible(
-        [
-          ".job-details-jobs-unified-top-card",
-          ".jobs-unified-top-card",
-          ".jobs-details-top-card",
-          "[class*='job-details-jobs-unified-top-card']",
-          "[class*='jobs-unified-top-card']",
-        ],
-        root || document,
-      ) || root
-    );
-  }
-
   function pick(selectors) {
     for (const selector of selectors) {
       const el = document.querySelector(selector);
@@ -378,15 +468,6 @@
       if (text) return text;
     }
     return "";
-  }
-
-  function pickVisible(selectors, root = document) {
-    for (const selector of selectors) {
-      const matches = Array.from(root.querySelectorAll(selector));
-      const found = matches.find(isVisible) || matches[0];
-      if (found) return found;
-    }
-    return null;
   }
 
   function isVisible(el) {
