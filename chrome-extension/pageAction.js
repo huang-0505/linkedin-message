@@ -5,11 +5,22 @@
 // matched here so the extension only captures a page the user chose.
 
 (() => {
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
   let lastUrl = "";
   let injectTimer = 0;
+
+  if (typeof window[REFRESH_KEY] === "function") {
+    window[REFRESH_KEY]();
+    return;
+  }
+
+  window[REFRESH_KEY] = () => {
+    injectStyles();
+    scheduleInject(true);
+  };
 
   injectStyles();
   scheduleInject();
@@ -33,6 +44,11 @@
   }
 
   function injectButton(force = false) {
+    if (!document.body) {
+      scheduleInject(true);
+      return;
+    }
+
     const mode = currentMode();
     lastUrl = window.location.href;
 
@@ -539,6 +555,9 @@
         position: fixed;
         right: 24px;
         z-index: 2147483647;
+        opacity: 1 !important;
+        pointer-events: none;
+        visibility: visible !important;
       }
 
       #${BUTTON_ID}.lra-page-action-button {
@@ -557,6 +576,8 @@
         line-height: 20px;
         min-height: 40px;
         padding: 8px 18px;
+        pointer-events: auto;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
         white-space: nowrap;
       }
 
@@ -564,7 +585,14 @@
         background: #004182;
         border-color: #004182;
       }
+
+      @media (max-width: 760px) {
+        #${WRAP_ID}.lra-floating-wrap {
+          bottom: 84px;
+          right: 12px;
+        }
+      }
     `;
-    document.documentElement.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
   }
 })();

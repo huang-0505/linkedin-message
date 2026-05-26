@@ -9,6 +9,12 @@ importScripts("config.js");
 const WEB_APP_URL =
   globalThis.LRA_WEB_APP_URL || "http://localhost:3000/referral";
 const MAX_URL_LEN = 7500;
+const LINKEDIN_PAGE_ACTION_URLS = [
+  "https://*.linkedin.com/jobs/*",
+  "https://linkedin.com/jobs/*",
+  "https://*.linkedin.com/in/*",
+  "https://linkedin.com/in/*",
+];
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
@@ -32,6 +38,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   return false;
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  injectPageActionIntoOpenLinkedInTabs().catch((error) =>
+    console.warn("LinkedIn page action preload failed", error),
+  );
+});
+
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status !== "complete" || !isLinkedInJobOrProfileUrl(tab.url)) return;
+  ensurePageAction(tabId).catch((error) =>
+    console.warn("LinkedIn page action inject failed", error),
+  );
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  chrome.tabs
+    .get(tabId)
+    .then((tab) => {
+      if (!isLinkedInJobOrProfileUrl(tab.url)) return;
+      return ensurePageAction(tabId);
+    })
+    .catch((error) =>
+      console.warn("LinkedIn page action activation inject failed", error),
+    );
 });
 
 async function openWebApp(job) {
@@ -144,5 +175,37 @@ function contactBridgeFn(contact) {
     );
   } catch (error) {
     console.warn("contact bridge set failed", error);
+  }
+}
+
+async function injectPageActionIntoOpenLinkedInTabs() {
+  const tabs = await chrome.tabs.query({ url: LINKEDIN_PAGE_ACTION_URLS });
+  await Promise.all(
+    tabs
+      .filter((tab) => tab.id)
+      .map((tab) =>
+        ensurePageAction(tab.id).catch((error) =>
+          console.warn("LinkedIn page action tab inject failed", error),
+        ),
+      ),
+  );
+}
+
+async function ensurePageAction(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["pageAction.js"],
+  });
+}
+
+function isLinkedInJobOrProfileUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl || "");
+    const host = url.hostname.toLowerCase();
+    const parts = url.pathname.split("/").filter(Boolean);
+    const isLinkedIn = host === "linkedin.com" || host.endsWith(".linkedin.com");
+    return isLinkedIn && (parts[0] === "jobs" || (parts[0] === "in" && parts[1]));
+  } catch (_) {
+    return false;
   }
 }
