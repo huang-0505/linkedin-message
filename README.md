@@ -196,3 +196,4 @@ message per category.
 - Save selected real profile data (when added manually).
 - Outreach tracker (contacted / replied / follow-up needed).
 - Optional Supabase / Postgres for cross-device sync.
+# Linkedin-message
