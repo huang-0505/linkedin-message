@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import ContactPanel from "@/components/ContactPanel";
 import JobCard from "@/components/JobCard";
 import TargetPersonCard from "@/components/TargetPersonCard";
+import { inferJobTitleFromDescription } from "@/lib/jobText";
 import {
   deleteReferralContact,
   loadOutreachContext,
@@ -227,13 +228,14 @@ function readJobFromParams(
   if (!params) return null;
   const jobTitle = params.get("jobTitle") || "";
   const company = params.get("company") || "";
+  const jobDescription = params.get("jobDescription") || "";
   if (!jobTitle && !company) return null;
   return {
-    jobTitle,
+    jobTitle: jobTitle || inferJobTitleFromDescription(jobDescription),
     company,
     location: params.get("location") || "",
     jobUrl: params.get("jobUrl") || "",
-    jobDescription: params.get("jobDescription") || "",
+    jobDescription,
   };
 }
 
@@ -249,10 +251,18 @@ function readJobFromBridge(): JobData | null {
     const raw = window.localStorage.getItem(BRIDGE_KEY);
     if (!raw) return null;
     window.localStorage.removeItem(BRIDGE_KEY);
-    return JSON.parse(raw) as JobData;
+    return normalizeIncomingJob(JSON.parse(raw) as JobData);
   } catch {
     return null;
   }
+}
+
+function normalizeIncomingJob(job: JobData): JobData {
+  return {
+    ...job,
+    jobTitle:
+      job.jobTitle || inferJobTitleFromDescription(job.jobDescription || ""),
+  };
 }
 
 function readContactFromBridge(): IncomingProfileContact | null {

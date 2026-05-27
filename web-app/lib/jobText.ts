@@ -23,9 +23,60 @@ export function cleanJobTitle(title: string): string {
   return titleCaseRole(firstSegment.split(" ").slice(0, 3).join(" ") || normalized);
 }
 
+export function inferJobTitleFromDescription(description: string): string {
+  const text = description.replace(/\u00a0/g, " ").trim();
+  if (!text) return "";
+
+  const explicitTitle = valueAfterLabel(text, "(?:job title|title)");
+  if (isLikelyJobTitle(explicitTitle)) return cleanJobTitle(explicitTitle);
+
+  const patterns = [
+    /\b(?:is|are)\s+(?:looking|hiring|searching)\s+for\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+    /\bseeking\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+    /\b(?:role|position)\s+(?:of|for)\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const candidate = cleanCandidate(text.match(pattern)?.[1] || "");
+    if (isLikelyJobTitle(candidate)) return cleanJobTitle(candidate);
+  }
+
+  return "";
+}
+
+function valueAfterLabel(text: string, labelPattern: string): string {
+  const labels =
+    "(?:job title|title|company|location|job description|description|requirements?|responsibilities|qualifications)";
+  const match = text.match(
+    new RegExp(
+      `\\b${labelPattern}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*${labels}\\s*:|\\b${labels}\\s*:|$)`,
+      "i",
+    ),
+  );
+  return cleanCandidate(match?.[1] || "");
+}
+
+function cleanCandidate(text: string): string {
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .replace(/^(?:a|an|the)\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isLikelyJobTitle(title: string): boolean {
+  return /\b(engineer|scientist|manager|specialist|analyst|developer|designer|intern|lead|director|product|data|software|machine learning|ai|ml|consultant|associate|architect)\b/i.test(
+    title,
+  );
+}
+
 function compactKnownRole(title: string): string {
   const t = title.toLowerCase();
 
+  if (/\bforward\s+deployed\b/.test(t) && /\bai\b/.test(t) && /\bengineer\b/.test(t)) {
+    return "Forward Deployed AI Engineer";
+  }
   if (/\bforward\s+deployed\b/.test(t) && /\bengineer\b/.test(t)) {
     return "Forward Deployed Engineer";
   }
