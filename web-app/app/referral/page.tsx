@@ -5,7 +5,10 @@ import { useSearchParams } from "next/navigation";
 import ContactPanel from "@/components/ContactPanel";
 import JobCard from "@/components/JobCard";
 import TargetPersonCard from "@/components/TargetPersonCard";
-import { inferJobTitleFromDescription } from "@/lib/jobText";
+import {
+  inferJobTitleFromDescription,
+  inferJobTitleFromUrl,
+} from "@/lib/jobText";
 import {
   deleteReferralContact,
   loadOutreachContext,
@@ -231,7 +234,10 @@ function readJobFromParams(
   const jobDescription = params.get("jobDescription") || "";
   if (!jobTitle && !company) return null;
   return {
-    jobTitle: jobTitle || inferJobTitleFromDescription(jobDescription),
+    jobTitle:
+      jobTitle ||
+      inferJobTitleFromDescription(jobDescription) ||
+      inferJobTitleFromUrl(params.get("jobUrl") || ""),
     company,
     location: params.get("location") || "",
     jobUrl: params.get("jobUrl") || "",
@@ -261,7 +267,9 @@ function normalizeIncomingJob(job: JobData): JobData {
   return {
     ...job,
     jobTitle:
-      job.jobTitle || inferJobTitleFromDescription(job.jobDescription || ""),
+      job.jobTitle ||
+      inferJobTitleFromDescription(job.jobDescription || "") ||
+      inferJobTitleFromUrl(job.jobUrl || ""),
   };
 }
 

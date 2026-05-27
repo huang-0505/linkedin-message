@@ -30,18 +30,31 @@ export function inferJobTitleFromDescription(description: string): string {
   const explicitTitle = valueAfterLabel(text, "(?:job title|title)");
   if (isLikelyJobTitle(explicitTitle)) return cleanJobTitle(explicitTitle);
 
-  const patterns = [
-    /\b(?:is|are)\s+(?:looking|hiring|searching)\s+for\s+(?:an?|the)?\s+([^.\n;,]+)/i,
-    /\bseeking\s+(?:an?|the)?\s+([^.\n;,]+)/i,
-    /\b(?:role|position)\s+(?:of|for)\s+(?:an?|the)?\s+([^.\n;,]+)/i,
-  ];
-
-  for (const pattern of patterns) {
-    const candidate = cleanCandidate(text.match(pattern)?.[1] || "");
-    if (isLikelyJobTitle(candidate)) return cleanJobTitle(candidate);
-  }
+  const roleSentenceTitle = titleFromRoleSentence(text);
+  if (roleSentenceTitle) return cleanJobTitle(roleSentenceTitle);
 
   return "";
+}
+
+export function inferJobTitleFromUrl(jobUrl: string): string {
+  try {
+    const url = new URL(jobUrl);
+    const slug = decodeURIComponent(
+      url.pathname.match(/\/jobs\/view\/([^/?#]+)/i)?.[1] || "",
+    )
+      .replace(/\/$/, "")
+      .replace(/-\d+$/, "");
+
+    if (!slug || /^\d+$/.test(slug)) return "";
+
+    const atIndex = slug.lastIndexOf("-at-");
+    const titleSlug = atIndex > 0 ? slug.slice(0, atIndex) : slug;
+    const title = titleSlug.replace(/-/g, " ");
+
+    return isMetadataJobTitle(title) ? cleanJobTitle(title) : "";
+  } catch {
+    return "";
+  }
 }
 
 function valueAfterLabel(text: string, labelPattern: string): string {
@@ -65,9 +78,36 @@ function cleanCandidate(text: string): string {
     .trim();
 }
 
+function titleFromRoleSentence(text: string): string {
+  const patterns = [
+    /\bas\s+(?:an?|the)?\s+([^,.;\n]+?)(?:,|\syou\b|\swill\b)/i,
+    /\b(?:is|are)\s+(?:looking|hiring|searching)\s+for\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+    /\bseeking\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+    /\b(?:role|position)\s+(?:of|for)\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const candidate = cleanCandidate(text.match(pattern)?.[1] || "");
+    if (isLikelyJobTitle(candidate)) return candidate;
+  }
+
+  return "";
+}
+
 function isLikelyJobTitle(title: string): boolean {
   return /\b(engineer|scientist|manager|specialist|analyst|developer|designer|intern|lead|director|product|data|software|machine learning|ai|ml|consultant|associate|architect)\b/i.test(
     title,
+  );
+}
+
+function isMetadataJobTitle(title: string): boolean {
+  const text = title.replace(/\s+/g, " ").trim();
+  return Boolean(
+    text &&
+      text.length >= 2 &&
+      text.length <= 140 &&
+      /[a-zA-Z]/.test(text) &&
+      !/^(apply|easy apply|save|saved|remote|hybrid|on-site|full-time|premium|about the job|linkedin)$/i.test(text),
   );
 }
 

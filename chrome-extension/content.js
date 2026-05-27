@@ -12,7 +12,7 @@
     const selectedCardLines = getSelectedJobCardLines();
     const rawTitle =
       cleanText(titleEl?.textContent || "") ||
-      titleFromDocumentTitle() ||
+      titleFromPageMetadata() ||
       titleFromDescription(description) ||
       titleFromCardLines(selectedCardLines);
     const jobTitle = cleanJobTitle(rawTitle);
@@ -357,36 +357,126 @@
     return !/^(premium|job match|people you can reach out to)/i.test(value);
   }
 
-  function titleFromDocumentTitle() {
-    const pageTitle = cleanText(document.title || "").replace(/\s*\|\s*LinkedIn\s*$/i, "");
-    const hiring = pageTitle.match(/^(.+?)\s+hiring\s+(.+?)\s+in\s+.+$/i);
-    if (hiring && cleanText(hiring[2])) return cleanText(hiring[2]);
+  function titleFromPageMetadata() {
+    const titleSources = [
+      document.title,
+      metaContent("meta[property='og:title']"),
+      metaContent("meta[name='twitter:title']"),
+    ];
 
-    const ogTitle = cleanText(
-      document.querySelector("meta[property='og:title']")?.getAttribute("content") || "",
-    ).replace(/\s*\|\s*LinkedIn\s*$/i, "");
-    const ogHiring = ogTitle.match(/^(.+?)\s+hiring\s+(.+?)\s+in\s+.+$/i);
-    if (ogHiring && cleanText(ogHiring[2])) return cleanText(ogHiring[2]);
+    for (const source of titleSources) {
+      const title = titleFromLinkedInTitle(source);
+      if (title) return title;
+    }
+
+    const descriptionSources = [
+      metaContent("meta[name='description']"),
+      metaContent("meta[property='og:description']"),
+      metaContent("meta[name='twitter:description']"),
+    ];
+
+    for (const source of descriptionSources) {
+      const title = titleFromRoleSentence(source);
+      if (title) return title;
+    }
+
+    const canonicalLink = document.querySelector("link[rel='canonical']");
+    const urlSources = [
+      canonicalLink?.href || canonicalLink?.getAttribute("href") || "",
+      metaContent("meta[property='og:url']"),
+      window.location.href,
+    ];
+
+    for (const source of urlSources) {
+      const title = titleFromUrlSlug(source);
+      if (title) return title;
+    }
 
     return "";
   }
 
-  function titleFromDescription(description) {
-    const explicitTitle = valueAfterLabel(description, "(?:job title|title)").replace(/^["']|["']$/g, "");
-    if (isLikelyJobTitle(explicitTitle)) return explicitTitle;
+  function metaContent(selector) {
+    return cleanText(document.querySelector(selector)?.getAttribute("content") || "");
+  }
+
+  function titleFromLinkedInTitle(title) {
+    const value = cleanText(title)
+      .replace(/\s*\|\s*LinkedIn.*$/i, "")
+      .replace(/\s*-\s*LinkedIn.*$/i, "")
+      .trim();
+    if (!value || /^linkedin$/i.test(value)) return "";
+
+    const hiring = value.match(/^.+?\s+hiring\s+(.+?)(?:\s+in\s+.+)?$/i);
+    if (isMetadataJobTitle(hiring?.[1] || "")) return cleanText(hiring[1]);
+
+    const atCompany = value.match(/^(.+?)\s+at\s+.+$/i);
+    if (isMetadataJobTitle(atCompany?.[1] || "")) return cleanText(atCompany[1]);
+
+    const dash = value.match(/^(.+?)\s+[-–]\s+.+$/);
+    if (isLikelyJobTitle(dash?.[1] || "")) return cleanText(dash[1]);
+
+    return isLikelyJobTitle(value) ? value : "";
+  }
+
+  function titleFromRoleSentence(text) {
+    const value = cleanText(text);
+    if (!value) return "";
 
     const patterns = [
+      /\bas\s+(?:an?|the)?\s+([^,.;\n]+?)(?:,|\syou\b|\swill\b)/i,
       /\b(?:is|are)\s+(?:looking|hiring|searching)\s+for\s+(?:an?|the)?\s+([^.\n;,]+)/i,
       /\bseeking\s+(?:an?|the)?\s+([^.\n;,]+)/i,
       /\b(?:role|position)\s+(?:of|for)\s+(?:an?|the)?\s+([^.\n;,]+)/i,
     ];
 
     for (const pattern of patterns) {
-      const candidate = cleanText(description.match(pattern)?.[1] || "")
+      const candidate = cleanText(value.match(pattern)?.[1] || "")
         .replace(/^(?:a|an|the)\s+/i, "")
         .trim();
       if (isLikelyJobTitle(candidate)) return candidate;
     }
+
+    return "";
+  }
+
+  function titleFromUrlSlug(rawUrl) {
+    try {
+      const url = new URL(rawUrl, window.location.href);
+      const slug = decodeURIComponent(
+        url.pathname.match(/\/jobs\/view\/([^/?#]+)/i)?.[1] || "",
+      )
+        .replace(/\/$/, "")
+        .replace(/-\d+$/, "");
+
+      if (!slug || /^\d+$/.test(slug)) return "";
+
+      const atIndex = slug.lastIndexOf("-at-");
+      const titleSlug = atIndex > 0 ? slug.slice(0, atIndex) : slug;
+      const title = titleSlug.replace(/-/g, " ");
+      return isMetadataJobTitle(title) ? title : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function isMetadataJobTitle(title) {
+    const text = cleanText(title);
+    return Boolean(
+      text &&
+        text.length >= 2 &&
+        text.length <= 140 &&
+        /[a-zA-Z]/.test(text) &&
+        !isNoiseLine(text) &&
+        !/^linkedin$/i.test(text),
+    );
+  }
+
+  function titleFromDescription(description) {
+    const explicitTitle = valueAfterLabel(description, "(?:job title|title)").replace(/^["']|["']$/g, "");
+    if (isLikelyJobTitle(explicitTitle)) return explicitTitle;
+
+    const roleSentenceTitle = titleFromRoleSentence(description);
+    if (roleSentenceTitle) return roleSentenceTitle;
 
     return explicitTitle;
   }
