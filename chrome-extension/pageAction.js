@@ -104,7 +104,7 @@
       const message =
         mode === "profile"
           ? { type: "LRA_ADD_PROFILE", contact: extractProfile() }
-          : { type: "LRA_OPEN_JOB", job: extractJob() };
+          : { type: "LRA_OPEN_CURRENT_JOB" };
 
       const response = await chrome.runtime.sendMessage(message);
       if (!response?.ok) {

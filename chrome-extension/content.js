@@ -357,7 +357,23 @@
   }
 
   function titleFromDescription(description) {
-    return valueAfterLabel(description, "(?:job title|title)").replace(/^["']|["']$/g, "");
+    const explicitTitle = valueAfterLabel(description, "(?:job title|title)").replace(/^["']|["']$/g, "");
+    if (isLikelyJobTitle(explicitTitle)) return explicitTitle;
+
+    const patterns = [
+      /\b(?:is|are)\s+(?:looking|hiring|searching)\s+for\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+      /\bseeking\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+      /\b(?:role|position)\s+(?:of|for)\s+(?:an?|the)?\s+([^.\n;,]+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const candidate = cleanText(description.match(pattern)?.[1] || "")
+        .replace(/^(?:a|an|the)\s+/i, "")
+        .trim();
+      if (isLikelyJobTitle(candidate)) return candidate;
+    }
+
+    return explicitTitle;
   }
 
   function companyFromDescription(description) {
@@ -494,6 +510,9 @@
   function compactKnownRole(title) {
     const text = title.toLowerCase();
 
+    if (/\bforward\s+deployed\b/.test(text) && /\bai\b/.test(text) && /\bengineer\b/.test(text)) {
+      return "Forward Deployed AI Engineer";
+    }
     if (/\bforward\s+deployed\b/.test(text) && /\bengineer\b/.test(text)) {
       return "Forward Deployed Engineer";
     }
