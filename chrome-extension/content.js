@@ -12,6 +12,7 @@
     const selectedCardLines = getSelectedJobCardLines();
     const rawTitle =
       cleanText(titleEl?.textContent || "") ||
+      titleFromDocumentTitle() ||
       titleFromDescription(description) ||
       titleFromCardLines(selectedCardLines);
     const jobTitle = cleanJobTitle(rawTitle);
@@ -354,6 +355,20 @@
     const value = cleanText(text);
     if (value.length < 40) return false;
     return !/^(premium|job match|people you can reach out to)/i.test(value);
+  }
+
+  function titleFromDocumentTitle() {
+    const pageTitle = cleanText(document.title || "").replace(/\s*\|\s*LinkedIn\s*$/i, "");
+    const hiring = pageTitle.match(/^(.+?)\s+hiring\s+(.+?)\s+in\s+.+$/i);
+    if (hiring && cleanText(hiring[2])) return cleanText(hiring[2]);
+
+    const ogTitle = cleanText(
+      document.querySelector("meta[property='og:title']")?.getAttribute("content") || "",
+    ).replace(/\s*\|\s*LinkedIn\s*$/i, "");
+    const ogHiring = ogTitle.match(/^(.+?)\s+hiring\s+(.+?)\s+in\s+.+$/i);
+    if (ogHiring && cleanText(ogHiring[2])) return cleanText(ogHiring[2]);
+
+    return "";
   }
 
   function titleFromDescription(description) {
