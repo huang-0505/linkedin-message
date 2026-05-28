@@ -7,6 +7,15 @@ export type JobData = {
   location?: string;
   jobUrl?: string;
   jobDescription?: string;
+  sponsorshipStatus?: SponsorshipStatus;
+  sponsorshipEvidence?: string;
+};
+
+export type SponsorshipStatus = "sponsors" | "no_sponsorship" | "unknown";
+
+export type SponsorshipAnalysis = {
+  status: SponsorshipStatus;
+  evidence: string;
 };
 
 export type TargetPerson = {

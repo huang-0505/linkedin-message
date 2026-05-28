@@ -227,6 +227,10 @@ function buildQueryParams(job) {
     // user can paste more if they need it.
     params.set("jobDescription", job.jobDescription.slice(0, 4000));
   }
+  if (job.sponsorshipStatus) params.set("sponsorshipStatus", job.sponsorshipStatus);
+  if (job.sponsorshipEvidence) {
+    params.set("sponsorshipEvidence", job.sponsorshipEvidence.slice(0, 400));
+  }
   return params;
 }
 

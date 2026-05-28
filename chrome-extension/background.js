@@ -134,6 +134,10 @@ function buildQueryParams(job) {
   if (job.location) params.set("location", job.location);
   if (job.jobUrl) params.set("jobUrl", job.jobUrl);
   if (job.jobDescription) params.set("jobDescription", job.jobDescription.slice(0, 4000));
+  if (job.sponsorshipStatus) params.set("sponsorshipStatus", job.sponsorshipStatus);
+  if (job.sponsorshipEvidence) {
+    params.set("sponsorshipEvidence", job.sponsorshipEvidence.slice(0, 400));
+  }
   return params;
 }
 

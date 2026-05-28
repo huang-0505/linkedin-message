@@ -1,6 +1,7 @@
 "use client";
 
-import type { JobData } from "@/lib/types";
+import { analyzeSponsorship } from "@/lib/jobText";
+import type { JobData, SponsorshipStatus } from "@/lib/types";
 
 type Props = {
   job: JobData;
@@ -8,6 +9,16 @@ type Props = {
 };
 
 export default function JobCard({ job, onChange }: Props) {
+  function updateDescription(description: string) {
+    const sponsorship = analyzeSponsorship(description);
+    onChange({
+      ...job,
+      jobDescription: description,
+      sponsorshipStatus: sponsorship.status,
+      sponsorshipEvidence: sponsorship.evidence,
+    });
+  }
+
   return (
     <div className="card space-y-3">
       <h2 className="text-lg font-semibold">Job</h2>
@@ -33,6 +44,15 @@ export default function JobCard({ job, onChange }: Props) {
           value={job.jobUrl ?? ""}
           onChange={(v) => onChange({ ...job, jobUrl: v })}
         />
+        <SponsorshipSelect
+          value={job.sponsorshipStatus ?? "unknown"}
+          onChange={(v) => onChange({ ...job, sponsorshipStatus: v })}
+        />
+        <Field
+          label="Sponsorship evidence"
+          value={job.sponsorshipEvidence ?? ""}
+          onChange={(v) => onChange({ ...job, sponsorshipEvidence: v })}
+        />
       </div>
 
       <div>
@@ -42,10 +62,35 @@ export default function JobCard({ job, onChange }: Props) {
         <textarea
           className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm min-h-[140px]"
           value={job.jobDescription ?? ""}
-          onChange={(e) => onChange({ ...job, jobDescription: e.target.value })}
+          onChange={(e) => updateDescription(e.target.value)}
           placeholder="Paste or edit the job description text..."
         />
       </div>
+    </div>
+  );
+}
+
+function SponsorshipSelect({
+  value,
+  onChange,
+}: {
+  value: SponsorshipStatus;
+  onChange: (v: SponsorshipStatus) => void;
+}) {
+  return (
+    <div>
+      <label className="text-sm font-medium text-gray-700">
+        Visa sponsorship
+      </label>
+      <select
+        className="mt-1 w-full rounded-md border border-gray-300 bg-white p-2 text-sm"
+        value={value}
+        onChange={(e) => onChange(e.target.value as SponsorshipStatus)}
+      >
+        <option value="unknown">Unknown</option>
+        <option value="sponsors">Sponsors</option>
+        <option value="no_sponsorship">Does not sponsor</option>
+      </select>
     </div>
   );
 }

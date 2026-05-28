@@ -7,6 +7,7 @@ import type { ReferralPlan, JobData } from "./types";
 export function buildRulePlan(job: JobData): ReferralPlan {
   const company = job.company || "the company";
   const title = cleanJobTitle(job.jobTitle || "the role");
+  const sponsorshipSummary = sponsorshipSummaryFor(job);
   const queries = defaultSearchQueries({
     company,
     jobTitle: title,
@@ -25,13 +26,21 @@ export function buildRulePlan(job: JobData): ReferralPlan {
     },
     {
       category: "Recruiter",
-      whyRelevant: `Recruiters can confirm the role is open and surface it to the hiring manager.`,
+      whyRelevant:
+        job.sponsorshipStatus === "unknown"
+          ? `Recruiters can confirm the role is open, verify visa sponsorship support, and surface it to the hiring manager.`
+          : `Recruiters can confirm the role is open and surface it to the hiring manager.`,
       q: queries[2],
     },
   ];
 
   return {
-    jobSummary: `${title} at ${company}${job.location ? ` (${job.location})` : ""}.`,
+    jobSummary: [
+      `${title} at ${company}${job.location ? ` (${job.location})` : ""}.`,
+      sponsorshipSummary,
+    ]
+      .filter(Boolean)
+      .join("\n"),
     targetPeople: categories.map(({ category, whyRelevant, q }) => ({
       category,
       whyRelevant,
@@ -46,4 +55,20 @@ export function buildRulePlan(job: JobData): ReferralPlan {
 
 function connectionMessageFor(company: string, title: string): string {
   return `Hi, I'm Junhui, a Brown DS master's grad focused on LLM/RAG. I'm applying for the ${title} role at ${company}. Do you happen to know the hiring team or referral process? I'd be grateful for any guidance and happy to chat briefly.`;
+}
+
+function sponsorshipSummaryFor(job: JobData): string {
+  const evidence = job.sponsorshipEvidence
+    ? ` Evidence: "${job.sponsorshipEvidence}"`
+    : "";
+
+  if (job.sponsorshipStatus === "sponsors") {
+    return `Visa sponsorship: appears available.${evidence}`;
+  }
+
+  if (job.sponsorshipStatus === "no_sponsorship") {
+    return `Visa sponsorship: appears unavailable. Confirm work authorization before spending referral effort.${evidence}`;
+  }
+
+  return "Visa sponsorship: unknown. Ask a recruiter or contact to confirm before investing much time.";
 }

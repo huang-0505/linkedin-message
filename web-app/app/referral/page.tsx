@@ -6,6 +6,7 @@ import ContactPanel from "@/components/ContactPanel";
 import JobCard from "@/components/JobCard";
 import TargetPersonCard from "@/components/TargetPersonCard";
 import {
+  analyzeSponsorship,
   inferJobTitleFromDescription,
   inferJobTitleFromUrl,
 } from "@/lib/jobText";
@@ -22,6 +23,7 @@ import type {
   JobData,
   ReferralContact,
   ReferralPlan,
+  SponsorshipStatus,
 } from "@/lib/types";
 
 const EMPTY_JOB: JobData = {
@@ -30,6 +32,8 @@ const EMPTY_JOB: JobData = {
   location: "",
   jobUrl: "",
   jobDescription: "",
+  sponsorshipStatus: "unknown",
+  sponsorshipEvidence: "",
 };
 
 const GENERATE_TIMEOUT_MS = 5000;
@@ -233,7 +237,7 @@ function readJobFromParams(
   const company = params.get("company") || "";
   const jobDescription = params.get("jobDescription") || "";
   if (!jobTitle && !company) return null;
-  return {
+  return normalizeIncomingJob({
     jobTitle:
       jobTitle ||
       inferJobTitleFromDescription(jobDescription) ||
@@ -242,7 +246,9 @@ function readJobFromParams(
     location: params.get("location") || "",
     jobUrl: params.get("jobUrl") || "",
     jobDescription,
-  };
+    sponsorshipStatus: sponsorshipStatusFromValue(params.get("sponsorshipStatus")),
+    sponsorshipEvidence: params.get("sponsorshipEvidence") || "",
+  });
 }
 
 // The extension also writes job data to localStorage under this key as a
@@ -264,13 +270,31 @@ function readJobFromBridge(): JobData | null {
 }
 
 function normalizeIncomingJob(job: JobData): JobData {
+  const analyzed = analyzeSponsorship(job.jobDescription || "");
+  const explicitStatus = sponsorshipStatusFromValue(job.sponsorshipStatus);
+  const status =
+    explicitStatus && explicitStatus !== "unknown" ? explicitStatus : analyzed.status;
+
   return {
     ...job,
     jobTitle:
       job.jobTitle ||
       inferJobTitleFromDescription(job.jobDescription || "") ||
       inferJobTitleFromUrl(job.jobUrl || ""),
+    sponsorshipStatus: status,
+    sponsorshipEvidence:
+      job.sponsorshipEvidence ||
+      (status === analyzed.status ? analyzed.evidence : ""),
   };
+}
+
+function sponsorshipStatusFromValue(
+  value: string | SponsorshipStatus | undefined | null,
+): SponsorshipStatus | undefined {
+  if (value === "sponsors" || value === "no_sponsorship" || value === "unknown") {
+    return value;
+  }
+  return undefined;
 }
 
 function readContactFromBridge(): IncomingProfileContact | null {
