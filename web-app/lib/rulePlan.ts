@@ -54,7 +54,7 @@ export function buildRulePlan(job: JobData): ReferralPlan {
 }
 
 function connectionMessageFor(company: string, title: string): string {
-  return `Hi, I'm Junhui, a Brown DS master's grad focused on LLM/RAG. I'm applying for the ${title} role at ${company}. Do you happen to know the hiring team or referral process? I'd be grateful for any guidance and happy to chat briefly.`;
+  return fitLinkedInMessage(company, title, messageFamilyFor(title));
 }
 
 function sponsorshipSummaryFor(job: JobData): string {
@@ -71,4 +71,58 @@ function sponsorshipSummaryFor(job: JobData): string {
   }
 
   return "Visa sponsorship: unknown. Ask a recruiter or contact to confirm before investing much time.";
+}
+
+function messageFamilyFor(title: string): "ai" | "data_science" | "general" {
+  const value = title.toLowerCase();
+
+  if (/\b(data\s+scientist|decision\s+scientist|research\s+analyst|data\s+analyst|analytics)\b/.test(value)) {
+    return "data_science";
+  }
+
+  if (
+    /\b(ai|llm|rag|generative|genai|nlp|prompt|machine\s+learning|ml\s+engineer|forward\s+deployed|solutions?\s+engineer|customer\s+engineer)\b/.test(
+      value,
+    )
+  ) {
+    return "ai";
+  }
+
+  return "general";
+}
+
+function fitLinkedInMessage(
+  company: string,
+  title: string,
+  family: "ai" | "data_science" | "general",
+): string {
+  const budgetWithNameRoom = 290;
+  const message = (nextCompany: string) =>
+    messageForFamily(title, nextCompany, family);
+
+  const current = message(company);
+  if (current.length <= budgetWithNameRoom) return current;
+
+  const withoutCompany = message("");
+  if (withoutCompany.length <= budgetWithNameRoom) return withoutCompany;
+
+  return `Hi, I'm Junhui, Brown DS master's focused on data/AI systems. I am applying for ${title}. Would appreciate a referral or intro to the hiring team. Thanks!`;
+}
+
+function messageForFamily(
+  title: string,
+  company: string,
+  family: "ai" | "data_science" | "general",
+): string {
+  const role = company ? `${title} at ${company}` : title;
+
+  if (family === "data_science") {
+    return `Hi, I'm Junhui, Brown DS master's focused on ML and LLM systems, built an XGBoost model saving ~$2M in cement production and fine-tuned an LLM for a vet-tech startup. I am applying for ${role}. Would appreciate a referral or intro to the hiring team. Thanks!`;
+  }
+
+  if (family === "ai") {
+    return `Hi, I'm Junhui, Brown DS master's focused on AI/LLM systems, built AI platform for construction SaaS and multi-agent DnD AI game. I am applying for ${role}. I'd really appreciate your help with a referral or connecting with the hiring team. Thanks in advance!`;
+  }
+
+  return `Hi, I'm Junhui, Brown DS master's focused on data/AI systems. I am applying for ${role}. Would appreciate a referral or intro to the hiring team. Thanks!`;
 }
