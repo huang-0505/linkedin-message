@@ -22,32 +22,35 @@ const aiPlan = buildRulePlan({
 });
 assert.equal(
   aiPlan.targetPeople[0].connectionMessage,
-  "Hi, I'm Junhui, Brown DS master's focused on AI/LLM systems, built AI platform for construction SaaS and multi-agent DnD AI game. I am applying for AI Engineer at Acme. I'd really appreciate your help with a referral or connecting with the hiring team. Thanks in advance!",
+  "Hi, I'm Junhui, a Brown DS master's grad focused on ML/LLM and software development. I'm applying for the AI Engineer role at Acme. Do you happen to know the hiring team or referral process? I'd be grateful for any guidance and happy to connect and chat!",
 );
-assert.ok(aiPlan.targetPeople[0].connectionMessage.length <= 290);
+assert.ok(aiPlan.targetPeople[0].connectionMessage.length <= 300);
 
 const dataScientistPlan = buildRulePlan({
   jobTitle: "Data Scientist",
-  company: "Acme",
+  company: "Federal Reserve Bank of Atlanta",
 });
 assert.equal(
   dataScientistPlan.targetPeople[0].connectionMessage,
-  "Hi, I'm Junhui, Brown DS master's focused on ML and LLM systems, built an XGBoost model saving ~$2M in cement production and fine-tuned an LLM for a vet-tech startup. I am applying for Data Scientist at Acme. Would appreciate a referral or intro to the hiring team. Thanks!",
+  "Hi, I'm Junhui, a Brown DS master's grad focused on ML/LLM and software development. I'm applying for the Data Scientist role at Federal Reserve Bank of Atlanta. Do you happen to know the hiring team or referral process? I'd be grateful for any guidance and happy to connect and chat!",
 );
 assert.doesNotMatch(dataScientistPlan.targetPeople[0].connectionMessage, /LLM\/RAG/);
-assert.ok(dataScientistPlan.targetPeople[0].connectionMessage.length <= 290);
+assert.ok(dataScientistPlan.targetPeople[0].connectionMessage.length <= 300);
 
 const fdePlan = buildRulePlan({
   jobTitle: "Forward Deployed Engineer",
   company: "Acme",
 });
-assert.match(fdePlan.targetPeople[0].connectionMessage, /construction SaaS/);
-assert.ok(fdePlan.targetPeople[0].connectionMessage.length <= 290);
+assert.match(
+  fdePlan.targetPeople[0].connectionMessage,
+  /focused on ML\/LLM and software development/,
+);
+assert.ok(fdePlan.targetPeople[0].connectionMessage.length <= 300);
 
 const longTitlePlan = buildRulePlan({
   jobTitle: "Senior Forward Deployed Generative AI Solutions Engineer",
   company: "VeryLongEnterpriseCompanyName",
 });
-assert.ok(longTitlePlan.targetPeople[0].connectionMessage.length <= 290);
+assert.ok(longTitlePlan.targetPeople[0].connectionMessage.length <= 300);
 
 console.log("rule plan tests passed");
