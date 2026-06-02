@@ -11,6 +11,7 @@ export function buildRulePlan(job: JobData): ReferralPlan {
   const queries = defaultSearchQueries({
     company,
     jobTitle: title,
+    city: cityFromLocation(job.location),
   });
 
   const categories: Array<{ category: string; whyRelevant: string; q: string }> = [
@@ -71,6 +72,23 @@ function sponsorshipSummaryFor(job: JobData): string {
   }
 
   return "Visa sponsorship: unknown. Ask a recruiter or contact to confirm before investing much time.";
+}
+
+function cityFromLocation(location = ""): string {
+  const value = location
+    .replace(/\u00a0/g, " ")
+    .split(/[·•|]/)[0]
+    .split(",")[0]
+    .trim()
+    .replace(/^greater\s+/i, "")
+    .replace(/\s+(metropolitan\s+area|metro\s+area|area)$/i, "")
+    .trim();
+
+  if (!value || /^(remote|hybrid|on-site|onsite|united states|canada)$/i.test(value)) {
+    return "";
+  }
+
+  return value;
 }
 
 function fitLinkedInMessage(company: string, title: string): string {

@@ -11,14 +11,19 @@ export function buildLinkedInPeopleSearchUrl(query: string): string {
 export function defaultSearchQueries(opts: {
   company: string;
   jobTitle: string;
+  city?: string;
   school?: string;
 }): string[] {
-  const { company, jobTitle } = opts;
+  const { company, jobTitle, city } = opts;
   return [
-    `${company} "${jobTitle}"`,
-    `${company} ${managerRoleFor(jobTitle)}`,
-    `${company} recruiter talent acquisition ${functionalArea(jobTitle)}`.trim(),
+    withCity(`${company} "${jobTitle}"`, city),
+    withCity(`${company} ${managerRoleFor(jobTitle)}`, city),
+    withCity(`${company} recruiter talent acquisition ${functionalArea(jobTitle)}`.trim(), city),
   ];
+}
+
+function withCity(query: string, city = ""): string {
+  return [query.trim(), city.trim()].filter(Boolean).join(" ");
 }
 
 function managerRoleFor(title: string): string {

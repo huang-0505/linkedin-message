@@ -53,4 +53,14 @@ const longTitlePlan = buildRulePlan({
 });
 assert.ok(longTitlePlan.targetPeople[0].connectionMessage.length <= 300);
 
+const atlantaPlan = buildRulePlan({
+  jobTitle: "Data Scientist",
+  company: "Telligen",
+  location: "Atlanta, GA",
+});
+atlantaPlan.targetPeople.forEach((person) => {
+  assert.match(person.searchQuery, /\bAtlanta\b/);
+  assert.match(person.linkedinSearchUrl, /Atlanta/);
+});
+
 console.log("rule plan tests passed");
