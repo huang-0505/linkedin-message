@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.4.0";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V6__";
+  const EXTENSION_VERSION = "0.4.1";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V7__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -240,6 +240,7 @@
     if (!didCopy) throw new Error("Copy failed.");
   }
 
+  let lastInjectAttached = 0;
   function injectSearchResultHelpers() {
     // Evict legacy "CN" chips from prior extension versions.
     document
@@ -252,33 +253,48 @@
     for (const row of findPeopleSearchRows()) {
       if (ensureRowConnectButton(row, { weeklyBlocked, cooldown })) attached += 1;
     }
+    lastInjectAttached = attached;
     refreshRateBanner();
     return attached;
   }
 
   function findPeopleSearchRows() {
     const main = document.querySelector("main") || document.body;
-    let rows = Array.from(
+    const known = Array.from(
       main.querySelectorAll(
-        "[data-view-name='search-entity-result-universal-template']",
+        [
+          "[data-view-name='search-entity-result-universal-template']",
+          "[data-chameleon-result-urn]",
+          "[data-test-search-entity]",
+          ".reusable-search__result-container",
+          ".entity-result",
+          ".search-result",
+          "ul.reusable-search__entity-result-list > li",
+          "ul[role='list'] > li.artdeco-list__item",
+        ].join(", "),
       ),
     );
-    if (rows.length === 0) {
-      rows = Array.from(
-        main.querySelectorAll(
-          ".reusable-search__result-container, .entity-result, .search-result",
-        ),
-      );
-    }
-    // De-dupe (a single row can match multiple selectors via different ancestors).
+
     const seen = new Set();
-    const unique = [];
-    for (const row of rows) {
-      if (seen.has(row)) continue;
+    const collected = [];
+    const pushUnique = (row) => {
+      if (!row || seen.has(row)) return;
       seen.add(row);
-      unique.push(row);
+      collected.push(row);
+    };
+
+    for (const row of known) pushUnique(row);
+
+    // Fallback: walk up from every visible /in/ profile link and ask
+    // closestSearchResultRow to find a row container. Always run this, because
+    // LinkedIn can mix known row wrappers with renamed result wrappers.
+    const links = Array.from(main.querySelectorAll('a[href*="/in/"]')).filter(isVisible);
+    for (const link of links) {
+      const row = closestSearchResultRow(link);
+      if (row) pushUnique(row);
     }
-    return unique.filter((row) => {
+
+    return collected.filter((row) => {
       if (!isVisible(row)) return false;
       const link = row.querySelector('a[href*="/in/"]');
       if (!link) return false;
@@ -435,13 +451,18 @@
     if (seed && !row.contains(seed)) return false;
 
     const rect = row.getBoundingClientRect();
-    if (rect.height > 420 || rect.width < 240) return false;
+    // Bumped from 420 → 600. Rows with mutual-connection lines, multi-line
+    // headlines, or job titles wrapping to 2 lines can exceed 420px.
+    if (rect.height > 600 || rect.width < 240) return false;
 
     const actionCount = countVisibleRowActions(row);
-    if (actionCount > 3) return false;
+    if (actionCount > 4) return false;
 
     if (row.querySelector(`.${ROW_HELPER_CLASS}`)) return true;
-    if (row.querySelector('a[href*="/in/"]') && actionCount >= 1) return true;
+    if (row.querySelector(`.${ROW_BUTTON_CLASS}`)) return true;
+    // A profile link is the strongest signal that this is a people row.
+    // Don't require a visible action button — "No connect" rows still qualify.
+    if (row.querySelector('a[href*="/in/"]')) return true;
 
     const text = cleanText(row.innerText || row.textContent || "");
     return /\b(1st|2nd|3rd\+?|3rd)\b/i.test(text) && /\b(message|connect|follow)\b/i.test(text);
@@ -452,6 +473,7 @@
       (button) =>
         isVisible(button) &&
         !button.classList.contains(ROW_HELPER_CLASS) &&
+        !button.classList.contains(ROW_BUTTON_CLASS) &&
         /\b(message|connect|follow|more)\b/i.test(buttonLabel(button)),
     ).length;
   }
@@ -526,7 +548,11 @@
       banner.appendChild(clear);
     } else {
       const status = document.createElement("span");
-      status.textContent = `Connect + Note · ${stats.todayCount}/${settings.dailyCap} today · ${stats.weekCount}/${settings.weeklyCap} week`;
+      const rowSuffix =
+        lastInjectAttached > 0
+          ? ` · ${lastInjectAttached} rows`
+          : " · waiting for rows";
+      status.textContent = `Connect + Note · ${stats.todayCount}/${settings.dailyCap} today · ${stats.weekCount}/${settings.weeklyCap} week${rowSuffix}`;
       banner.appendChild(status);
 
       const minus = document.createElement("button");
@@ -819,6 +845,7 @@
     return buttons.find((button) => {
       if (!isVisible(button)) return false;
       if (button.classList.contains(ROW_HELPER_CLASS)) return false;
+      if (button.classList.contains(ROW_BUTTON_CLASS)) return false;
       return pattern.test(buttonLabel(button));
     });
   }
@@ -844,6 +871,7 @@
         (action) =>
           isVisible(action) &&
           !action.classList.contains(ROW_HELPER_CLASS) &&
+          !action.classList.contains(ROW_BUTTON_CLASS) &&
           pattern.test(buttonLabel(action)),
       );
       if (match) return match;

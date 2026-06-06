@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LinkedIn Referral Assistant",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Personal-use helper for LinkedIn referrals, current-company search, and manual connect-note filling.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
