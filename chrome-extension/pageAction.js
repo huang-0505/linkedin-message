@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.4.3";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V9__";
+  const EXTENSION_VERSION = "0.4.4";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V10__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -95,7 +95,7 @@
 
     restoreConnectIntentName();
     injectConnectModalHelper();
-    ensureInviteContextLoaded();
+    if (mode === "search" || mode === "profile") ensureInviteContextLoaded();
 
     if (mode === "search") {
       removeButton();
@@ -212,10 +212,56 @@
   }
 
   async function copyActiveOutreachNote() {
-    const result = await chrome.storage.local.get("lra:active-outreach-context");
+    const result = await storageGet("lra:active-outreach-context");
     const note = result?.["lra:active-outreach-context"]?.connectionMessage || "";
     if (!note.trim()) throw new Error("Missing outreach note.");
     await copyTextToClipboard(note);
+  }
+
+  async function storageGet(key) {
+    const local = extensionStorageLocal();
+    if (local?.get) return local.get(key);
+
+    const response = await runtimeStorageMessage("LRA_STORAGE_GET", { key });
+    return response?.values || {};
+  }
+
+  async function storageSet(values) {
+    const local = extensionStorageLocal();
+    if (local?.set) return local.set(values);
+
+    await runtimeStorageMessage("LRA_STORAGE_SET", { values });
+  }
+
+  async function storageRemove(key) {
+    const local = extensionStorageLocal();
+    if (local?.remove) return local.remove(key);
+
+    await runtimeStorageMessage("LRA_STORAGE_REMOVE", { key });
+  }
+
+  function extensionStorageLocal() {
+    const api = extensionChrome();
+    return api?.storage?.local || null;
+  }
+
+  function extensionChrome() {
+    try {
+      return typeof chrome === "undefined" ? null : chrome;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function runtimeStorageMessage(type, payload) {
+    const sendMessage = extensionChrome()?.runtime?.sendMessage;
+    if (!sendMessage) throw new Error("Extension storage unavailable.");
+
+    const response = await sendMessage({ type, ...payload });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Extension storage unavailable.");
+    }
+    return response;
   }
 
   async function copyTextToClipboard(text) {
@@ -1442,7 +1488,7 @@
   }
 
   async function activeOutreachContext() {
-    const result = await chrome.storage.local.get(ACTIVE_OUTREACH_CONTEXT_KEY);
+    const result = await storageGet(ACTIVE_OUTREACH_CONTEXT_KEY);
     return result?.[ACTIVE_OUTREACH_CONTEXT_KEY] || null;
   }
 
@@ -1494,7 +1540,7 @@
   }
 
   async function inviteStats() {
-    const result = await chrome.storage.local.get(INVITE_STATS_KEY);
+    const result = await storageGet(INVITE_STATS_KEY);
     const stats = normalizeStats(result?.[INVITE_STATS_KEY]);
     cachedStats = stats;
     lastSentAtMs = stats.lastSentAt;
@@ -1507,7 +1553,7 @@
 
   async function writeInviteStats(stats) {
     cachedStats = stats;
-    await chrome.storage.local.set({ [INVITE_STATS_KEY]: stats });
+    await storageSet({ [INVITE_STATS_KEY]: stats });
   }
 
   async function adjustInviteCount(delta) {
@@ -1527,7 +1573,7 @@
   }
 
   async function inviteSettings() {
-    const result = await chrome.storage.local.get(INVITE_SETTINGS_KEY);
+    const result = await storageGet(INVITE_SETTINGS_KEY);
     const settings = { ...DEFAULT_SETTINGS, ...(result?.[INVITE_SETTINGS_KEY] || {}) };
     settings.dailyCap = Math.max(1, Number(settings.dailyCap) || DEFAULT_SETTINGS.dailyCap);
     settings.weeklyCap = Math.max(1, Number(settings.weeklyCap) || DEFAULT_SETTINGS.weeklyCap);
@@ -1545,13 +1591,13 @@
     const current = await inviteSettings();
     const next = { ...current, ...patch };
     cachedSettings = next;
-    await chrome.storage.local.set({ [INVITE_SETTINGS_KEY]: next });
+    await storageSet({ [INVITE_SETTINGS_KEY]: next });
     refreshRateBanner();
     return next;
   }
 
   async function loadWeeklyBlock() {
-    const result = await chrome.storage.local.get(WEEKLY_BLOCK_KEY);
+    const result = await storageGet(WEEKLY_BLOCK_KEY);
     cachedWeeklyBlockUntil = Number(result?.[WEEKLY_BLOCK_KEY] || 0);
     return cachedWeeklyBlockUntil;
   }
@@ -1563,14 +1609,14 @@
   async function setWeeklyBlock(durationMs = 7 * 24 * 60 * 60 * 1000) {
     const until = Date.now() + durationMs;
     cachedWeeklyBlockUntil = until;
-    await chrome.storage.local.set({ [WEEKLY_BLOCK_KEY]: until });
+    await storageSet({ [WEEKLY_BLOCK_KEY]: until });
     refreshRateBanner();
     injectSearchResultHelpers();
   }
 
   async function clearWeeklyBlock() {
     cachedWeeklyBlockUntil = 0;
-    await chrome.storage.local.remove(WEEKLY_BLOCK_KEY);
+    await storageRemove(WEEKLY_BLOCK_KEY);
     refreshRateBanner();
     injectSearchResultHelpers();
   }
@@ -1619,14 +1665,14 @@
   async function persistConnectIntent(intent) {
     const slug = String(intent?.slug || "").trim();
     if (!slug) return;
-    const result = await chrome.storage.local.get(PENDING_INTENTS_KEY);
+    const result = await storageGet(PENDING_INTENTS_KEY);
     const map = result?.[PENDING_INTENTS_KEY] || {};
     map[slug] = {
       name: String(intent.name || "").slice(0, 120),
       profileUrl: canonicalProfileUrlFromHref(intent.profileUrl || "") || String(intent.profileUrl || ""),
       savedAt: Number(intent.savedAt || Date.now()),
     };
-    await chrome.storage.local.set({ [PENDING_INTENTS_KEY]: map });
+    await storageSet({ [PENDING_INTENTS_KEY]: map });
     // Also keep the legacy sessionStorage intent — used by updateProfileConnectStatus.
     rememberConnectIntent({ name: map[slug].name, profileUrl: map[slug].profileUrl, savedAt: map[slug].savedAt });
   }
@@ -1634,12 +1680,12 @@
   async function consumePendingIntent(slug) {
     const safeSlug = String(slug || "").trim();
     if (!safeSlug) return null;
-    const result = await chrome.storage.local.get(PENDING_INTENTS_KEY);
+    const result = await storageGet(PENDING_INTENTS_KEY);
     const map = result?.[PENDING_INTENTS_KEY] || {};
     const intent = map[safeSlug];
     if (!intent) return null;
     delete map[safeSlug];
-    await chrome.storage.local.set({ [PENDING_INTENTS_KEY]: map });
+    await storageSet({ [PENDING_INTENTS_KEY]: map });
     if (Date.now() - Number(intent.savedAt || 0) > 10 * 60 * 1000) return null;
     return intent;
   }

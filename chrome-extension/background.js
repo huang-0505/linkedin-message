@@ -67,8 +67,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LRA_STORAGE_GET") {
+    storageGet(message.key)
+      .then((values) => sendResponse({ ok: true, values }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      );
+    return true;
+  }
+
+  if (message.type === "LRA_STORAGE_SET") {
+    storageSet(message.values)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      );
+    return true;
+  }
+
+  if (message.type === "LRA_STORAGE_REMOVE") {
+    storageRemove(message.key)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      );
+    return true;
+  }
+
   return false;
 });
+
+async function storageGet(key) {
+  if (!isSafeStorageKeyInput(key)) throw new Error("Invalid storage key.");
+  return chrome.storage.local.get(key);
+}
+
+async function storageSet(values) {
+  if (!isSafeStorageValues(values)) throw new Error("Invalid storage values.");
+  await chrome.storage.local.set(values);
+}
+
+async function storageRemove(key) {
+  if (!isSafeStorageKeyInput(key)) throw new Error("Invalid storage key.");
+  await chrome.storage.local.remove(key);
+}
+
+function isSafeStorageValues(values) {
+  if (!values || typeof values !== "object" || Array.isArray(values)) return false;
+  return Object.keys(values).every(isLraStorageKey);
+}
+
+function isSafeStorageKeyInput(key) {
+  if (typeof key === "string") return isLraStorageKey(key);
+  if (Array.isArray(key)) return key.every(isLraStorageKey);
+  if (key && typeof key === "object") return Object.keys(key).every(isLraStorageKey);
+  return false;
+}
+
+function isLraStorageKey(key) {
+  return typeof key === "string" && key.startsWith("lra:");
+}
 
 async function openProfileTab(rawUrl) {
   const url = String(rawUrl || "").trim();
