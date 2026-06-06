@@ -6,13 +6,13 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.4.1";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V7__";
+  const EXTENSION_VERSION = "0.4.3";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V9__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
   const ROW_HELPER_CLASS = "lra-row-connect-helper"; // legacy "CN" chip class (left for stale-cleanup)
-  const ROW_BUTTON_CLASS = "lra-row-connect-button"; // full-width "Connect + Note" row button
+  const ROW_BUTTON_CLASS = "lra-row-connect-button"; // row-level "Connect + Note" button
   const ROW_BUTTON_WRAP_CLASS = "lra-row-connect-button-wrap";
   const MODAL_HELPER_ID = "lra-modal-note-helper";
   const SEARCH_STATUS_ID = "lra-search-helper-status";
@@ -246,6 +246,7 @@
     document
       .querySelectorAll(`.${ROW_HELPER_CLASS}:not(#${MODAL_HELPER_ID})`)
       .forEach((el) => el.remove());
+    cleanupStaleRowButtonWraps();
 
     let attached = 0;
     const weeklyBlocked = isWeeklyBlocked();
@@ -256,6 +257,19 @@
     lastInjectAttached = attached;
     refreshRateBanner();
     return attached;
+  }
+
+  function cleanupStaleRowButtonWraps() {
+    document.querySelectorAll(`.${ROW_BUTTON_WRAP_CLASS}`).forEach((wrap) => {
+      const button = wrap.querySelector(`.${ROW_BUTTON_CLASS}`);
+      if (
+        !button ||
+        button.dataset.lraVersion !== EXTENSION_VERSION ||
+        !wrap.dataset.lraOwnerRow
+      ) {
+        wrap.remove();
+      }
+    });
   }
 
   function findPeopleSearchRows() {
@@ -294,54 +308,180 @@
       if (row) pushUnique(row);
     }
 
-    return collected.filter((row) => {
+    const filtered = collected.filter((row) => {
       if (!isVisible(row)) return false;
       const link = row.querySelector('a[href*="/in/"]');
       if (!link) return false;
       return isLikelyPeopleSearchRow(row, link);
     });
+
+    // Dedupe by profile slug: LinkedIn rows have multiple /in/ links (photo +
+    // name + headline overlay), each walks up to a different ancestor. Keep
+    // the largest container per slug — it's the full row, not a sub-block.
+    const bestPerSlug = new Map();
+    for (const row of filtered) {
+      const slug = profileSlugFromHref(profileUrlFromRow(row));
+      if (!slug) continue;
+      const area = row.getBoundingClientRect().height * row.getBoundingClientRect().width;
+      const prev = bestPerSlug.get(slug);
+      if (!prev || area > prev.area) bestPerSlug.set(slug, { row, area });
+    }
+    return Array.from(bestPerSlug.values()).map((entry) => entry.row);
   }
 
   function ensureRowConnectButton(row, ctx) {
     const slug = profileSlugFromHref(profileUrlFromRow(row));
     const kind = getRowKind(row);
 
-    let wrap = row.querySelector(`.${ROW_BUTTON_WRAP_CLASS}`);
-    let button = wrap?.querySelector(`.${ROW_BUTTON_CLASS}`);
+    // Clean up ANY old wrap inside this row that may have been injected for a
+    // different ancestor before the dedupe ran (defensive — prevents stragglers).
+    const stale = row.querySelectorAll(`.${ROW_BUTTON_WRAP_CLASS}`);
+    let wrap = null;
+    let button = null;
+    stale.forEach((node) => {
+      const btn = node.querySelector(`.${ROW_BUTTON_CLASS}`);
+      if (
+        !wrap &&
+        btn &&
+        btn.dataset.lraVersion === EXTENSION_VERSION &&
+        btn.dataset.lraSlug === slug &&
+        node.dataset.lraOwnerRow === slug
+      ) {
+        wrap = node;
+        button = btn;
+      } else {
+        node.remove();
+      }
+    });
 
-    if (button && button.dataset.lraVersion === EXTENSION_VERSION && button.dataset.lraSlug === slug) {
+    // Also clean up any sibling wrap we previously injected AFTER the row.
+    const sibling = row.nextElementSibling;
+    if (
+      sibling &&
+      sibling.classList?.contains(ROW_BUTTON_WRAP_CLASS) &&
+      sibling.dataset.lraOwnerRow === slug
+    ) {
+      const btn = sibling.querySelector(`.${ROW_BUTTON_CLASS}`);
+      if (btn && btn.dataset.lraVersion === EXTENSION_VERSION) {
+        wrap = wrap || sibling;
+        button = button || btn;
+      } else {
+        sibling.remove();
+      }
+    }
+
+    if (button) {
       applyRowButtonState(button, kind, ctx);
       return true;
     }
 
-    if (wrap) wrap.remove();
-
     wrap = document.createElement("div");
     wrap.className = ROW_BUTTON_WRAP_CLASS;
+    wrap.dataset.lraOwnerRow = slug;
 
     button = document.createElement("button");
     button.type = "button";
     button.className = ROW_BUTTON_CLASS;
     button.dataset.lraVersion = EXTENSION_VERSION;
     button.dataset.lraSlug = slug;
-    button.addEventListener("click", (event) => {
+
+    // CAPTURE phase + stopImmediatePropagation so LinkedIn's overlay <a>
+    // doesn't get the click. Also intercept mousedown/pointerdown since
+    // some overlay handlers fire on those, not click.
+    const swallow = (event) => {
       event.preventDefault();
       event.stopPropagation();
-      handleRowConnectClick(row, button);
-    });
+      event.stopImmediatePropagation?.();
+    };
+    button.addEventListener("mousedown", swallow, true);
+    button.addEventListener("pointerdown", swallow, true);
+    button.addEventListener(
+      "click",
+      (event) => {
+        swallow(event);
+        handleRowConnectClick(row, button);
+      },
+      true,
+    );
 
     wrap.appendChild(button);
 
-    const target =
-      row.querySelector(".entity-result__actions") ||
-      row.querySelector(".reusable-search-simple-insight") ||
-      row.querySelector(".search-result__actions") ||
-      row.querySelector(".entity-result__content") ||
-      row;
-    target.appendChild(wrap);
+    const placement = rowButtonPlacement(row);
+    wrap.dataset.lraPlacement = placement.kind;
+    if (placement.before && placement.target?.insertBefore) {
+      placement.target.insertBefore(wrap, placement.before);
+    } else if (placement.target?.appendChild) {
+      placement.target.appendChild(wrap);
+    } else {
+      row.appendChild(wrap);
+    }
 
     applyRowButtonState(button, kind, ctx);
     return true;
+  }
+
+  function rowButtonPlacement(row) {
+    const nativeAction = findVisibleNativeRowAction(row);
+    const actionArea =
+      row.querySelector(
+        [
+          ".entity-result__actions",
+          ".search-result__actions",
+          "[data-test-search-result-actions]",
+        ].join(", "),
+      ) ||
+      nativeAction?.parentElement ||
+      null;
+
+    const candidates = [
+      { target: actionArea, before: nativeAction?.parentElement === actionArea ? nativeAction : null, kind: "actions" },
+      { target: row.querySelector(".reusable-search-simple-insight"), before: null, kind: "content" },
+      { target: row, before: null, kind: "fallback" },
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate.target) continue;
+      const target = escapeAnchorAncestor(candidate.target, row);
+      if (!target || !row.contains(target)) continue;
+      const before = candidate.before && target === candidate.target ? candidate.before : null;
+      return { target, before, kind: candidate.kind };
+    }
+
+    return { target: row, before: null, kind: "fallback" };
+  }
+
+  function findVisibleNativeRowAction(row) {
+    return Array.from(row.querySelectorAll("button, a[role='button']")).find((button) => {
+      if (!isVisible(button)) return false;
+      if (button.classList.contains(ROW_HELPER_CLASS)) return false;
+      if (button.classList.contains(ROW_BUTTON_CLASS)) return false;
+      return /\b(message|connect|follow|more|no\s*connect)\b/i.test(buttonLabel(button));
+    });
+  }
+
+  function escapeAnchorAncestor(node, stopAt) {
+    // If `node` is inside an <a> that's still within `stopAt`, walk up to the
+    // anchor's parent. If walking lands outside `stopAt`, give up and return
+    // `stopAt` so the caller can use sibling placement.
+    let current = node;
+    while (current && current !== stopAt) {
+      if (current.tagName === "A") {
+        const parent = current.parentElement;
+        if (!parent || !stopAt.contains(parent)) return stopAt;
+        current = parent;
+        continue;
+      }
+      // If any ancestor of `node` up to stopAt is an <a>, escape.
+      const anchorAncestor = current.closest && current.closest("a");
+      if (anchorAncestor && stopAt.contains(anchorAncestor)) {
+        const parent = anchorAncestor.parentElement;
+        if (!parent || !stopAt.contains(parent)) return stopAt;
+        current = parent;
+        continue;
+      }
+      return current;
+    }
+    return stopAt;
   }
 
   function applyRowButtonState(button, kind, ctx) {
@@ -425,25 +565,77 @@
       "li",
     ].join(", ");
     const direct = seed.closest(selector);
-    if (direct && isLikelyPeopleSearchRow(direct, seed)) return direct;
 
-    let best = null;
+    const candidates = [];
+    if (direct && isLikelyPeopleSearchRow(direct, seed)) candidates.push(direct);
+
     let node = seed.parentElement;
     for (let depth = 0; node && depth < 12; depth += 1, node = node.parentElement) {
       if (isLikelyPeopleSearchRow(node, seed)) {
-        best = node;
-        break;
+        candidates.push(node);
+        continue;
       }
 
-      if (!best && isVisible(node) && node.querySelector?.('a[href*="/in/"]')) {
+      if (isVisible(node) && node.querySelector?.('a[href*="/in/"]')) {
         const rect = node.getBoundingClientRect();
         if (rect.height > 0 && rect.height <= 480 && countVisibleRowActions(node) <= 3) {
-          best = node;
+          candidates.push(node);
         }
       }
     }
 
-    return best || direct || seed.parentElement;
+    return bestSearchResultRowCandidate(candidates) || direct || seed.parentElement;
+  }
+
+  function bestSearchResultRowCandidate(candidates) {
+    let best = null;
+    let bestScore = -Infinity;
+    for (const row of candidates) {
+      const score = searchResultRowScore(row);
+      if (score > bestScore) {
+        best = row;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  function searchResultRowScore(row) {
+    if (!row || !isVisible(row) || !row.querySelector?.('a[href*="/in/"]')) return -Infinity;
+
+    const rect = row.getBoundingClientRect();
+    if (rect.height <= 0 || rect.width < 240 || rect.height > 650) return -Infinity;
+
+    const actionCount = countVisibleRowActions(row);
+    if (actionCount > 4) return -Infinity;
+
+    let score = 0;
+    if (row.matches?.("[data-view-name='search-entity-result-universal-template']")) score += 80;
+    if (row.matches?.(".reusable-search__result-container, .entity-result, .search-result")) score += 70;
+    if (row.tagName === "LI") score += 40;
+    if (hasRowActionArea(row)) score += 35;
+    if (actionCount > 0) score += 25;
+
+    const text = cleanText(row.innerText || row.textContent || "");
+    if (/\b(?:1st|2nd|3rd\+?|3rd)\b/i.test(text)) score += 12;
+
+    // Prefer the full person result over the name/headline sub-block, but avoid
+    // drifting up into the whole list. The height cap above is the guardrail.
+    score += Math.min(rect.width / 30, 30);
+    score += Math.min(rect.height / 12, 45);
+    return score;
+  }
+
+  function hasRowActionArea(row) {
+    return Boolean(
+      row?.querySelector?.(
+        [
+          ".entity-result__actions",
+          ".search-result__actions",
+          "[data-test-search-result-actions]",
+        ].join(", "),
+      ),
+    );
   }
 
   function isLikelyPeopleSearchRow(row, seed) {
@@ -802,12 +994,24 @@
   }
 
   function openProfileInNewTab(profileUrl) {
+    // Prefer background-script tab creation — it's never popup-blocked and
+    // doesn't navigate the current tab if it fails. window.open is the
+    // last-resort fallback in case the background message handler is gone.
+    let sent = false;
     try {
-      const opened = window.open(profileUrl, "_blank", "noopener,noreferrer");
-      if (opened) return;
+      chrome.runtime.sendMessage(
+        { type: "LRA_OPEN_PROFILE_TAB", url: profileUrl },
+        (response) => {
+          // No-op; we just need the message to fire. Errors are swallowed.
+          void response;
+          void chrome.runtime.lastError;
+        },
+      );
+      sent = true;
     } catch (_) {}
+    if (sent) return;
     try {
-      chrome.runtime.sendMessage({ type: "LRA_OPEN_PROFILE_TAB", url: profileUrl });
+      window.open(profileUrl, "_blank", "noopener,noreferrer");
     } catch (_) {}
   }
 
@@ -2589,10 +2793,23 @@
       }
 
       .${ROW_BUTTON_WRAP_CLASS} {
+        align-items: center;
         box-sizing: border-box;
-        display: block;
+        display: flex;
+        flex: 0 0 auto;
+        justify-content: flex-end;
+        margin: 0 0 0 8px;
+        max-width: 190px;
+        position: relative;
+        width: auto;
+        z-index: 5;
+      }
+
+      .${ROW_BUTTON_WRAP_CLASS}[data-lra-placement="content"],
+      .${ROW_BUTTON_WRAP_CLASS}[data-lra-placement="fallback"] {
         flex-basis: 100%;
-        margin-top: 8px;
+        margin: 8px 0 0;
+        max-width: none;
         width: 100%;
       }
 
@@ -2608,12 +2825,17 @@
         font-size: 14px;
         font-weight: 600;
         gap: 6px;
+        isolation: isolate;
         justify-content: center;
         line-height: 20px;
+        max-width: 190px;
         min-height: 36px;
         padding: 8px 16px;
+        pointer-events: auto;
+        position: relative;
         white-space: nowrap;
-        width: 100%;
+        width: auto;
+        z-index: 10;
       }
 
       .${ROW_BUTTON_CLASS}:hover {
