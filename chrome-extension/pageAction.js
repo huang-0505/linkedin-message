@@ -6,12 +6,14 @@
 // or click final Send.
 
 (() => {
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V2__";
+  const EXTENSION_VERSION = "0.2.0";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V3__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
   const ROW_HELPER_CLASS = "lra-row-connect-helper";
   const MODAL_HELPER_ID = "lra-modal-note-helper";
+  const SEARCH_STATUS_ID = "lra-search-helper-status";
   const ACTIVE_OUTREACH_CONTEXT_KEY = "lra:active-outreach-context";
   let lastUrl = "";
   let injectTimer = 0;
@@ -60,6 +62,7 @@
 
     if (!mode) {
       removeButton();
+      removeSearchStatus();
       return;
     }
 
@@ -67,9 +70,12 @@
 
     if (mode === "search") {
       removeButton();
-      injectSearchResultHelpers();
+      const helperCount = injectSearchResultHelpers();
+      updateSearchStatus(helperCount);
       return;
     }
+
+    removeSearchStatus();
 
     const existing = document.getElementById(BUTTON_ID);
     if (existing && existing.dataset.mode === mode && !force) return;
@@ -199,10 +205,14 @@
   }
 
   function injectSearchResultHelpers() {
-    for (const row of searchResultRows().slice(0, 40)) {
-      if (row.querySelector(`.${ROW_HELPER_CLASS}`)) continue;
+    let helperCount = 0;
 
-      const actionButton = findRowActionButton(row);
+    for (const { row, actionButton } of searchResultActionTargets().slice(0, 40)) {
+      if (row.querySelector(`.${ROW_HELPER_CLASS}`)) {
+        helperCount += 1;
+        continue;
+      }
+
       if (!actionButton?.parentElement) continue;
 
       const helper = document.createElement("button");
@@ -218,37 +228,60 @@
       });
 
       actionButton.parentElement.insertBefore(helper, actionButton);
+      helperCount += 1;
     }
+
+    return helperCount;
   }
 
-  function searchResultRows() {
-    const rows = [];
-    const seen = new Set();
-    const seeds = [
-      ...document.querySelectorAll('a[href*="/in/"]'),
-      ...Array.from(document.querySelectorAll("button, a[role='button']")).filter(
-        (button) => /\b(message|connect|follow)\b/i.test(buttonLabel(button)),
-      ),
-    ];
+  function searchResultActionTargets() {
+    const targets = [];
+    const seenRows = new Set();
+    const main = document.querySelector("main") || document.body;
+    const actionButtons = Array.from(
+      main.querySelectorAll("button, a[role='button']"),
+    ).filter((button) => {
+      if (!isVisible(button)) return false;
+      if (button.classList.contains(ROW_HELPER_CLASS)) return false;
+      return /\b(message|connect|follow)\b/i.test(buttonLabel(button));
+    });
 
-    for (const seed of seeds) {
-      const row = seed.closest(
-        [
-          "[data-view-name='search-entity-result-universal-template']",
-          ".reusable-search__result-container",
-          ".entity-result",
-          "li",
-        ].join(", "),
-      );
+    for (const actionButton of actionButtons) {
+      const row = closestSearchResultRow(actionButton);
+      if (!row || seenRows.has(row) || !isVisible(row)) continue;
 
-      if (!row || seen.has(row) || !isVisible(row)) continue;
-      if (!findRowActionButton(row)) continue;
-
-      seen.add(row);
-      rows.push(row);
+      seenRows.add(row);
+      targets.push({ row, actionButton });
     }
 
-    return rows;
+    return targets;
+  }
+
+  function closestSearchResultRow(seed) {
+    const selector = [
+      "[data-view-name='search-entity-result-universal-template']",
+      ".reusable-search__result-container",
+      ".entity-result",
+      "li",
+    ].join(", ");
+    const direct = seed.closest(selector);
+    if (direct && isLikelyPeopleSearchRow(direct)) return direct;
+
+    let node = seed.parentElement;
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+      if (isLikelyPeopleSearchRow(node)) return node;
+    }
+
+    return direct || seed.parentElement;
+  }
+
+  function isLikelyPeopleSearchRow(row) {
+    if (!row || !isVisible(row)) return false;
+    if (row.querySelector(`.${ROW_HELPER_CLASS}`)) return true;
+    if (row.querySelector('a[href*="/in/"]')) return true;
+
+    const text = cleanText(row.innerText || row.textContent || "");
+    return /\b(1st|2nd|3rd\+?|3rd)\b/i.test(text) && /\b(message|connect|follow)\b/i.test(text);
   }
 
   function findRowActionButton(row) {
@@ -256,6 +289,25 @@
       findButtonByText(row, /^(message|connect|follow)$/i) ||
       findButtonByText(row, /\b(message|connect|follow)\b/i)
     );
+  }
+
+  function updateSearchStatus(helperCount) {
+    let status = document.getElementById(SEARCH_STATUS_ID);
+    if (!status) {
+      status = document.createElement("div");
+      status.id = SEARCH_STATUS_ID;
+      status.className = "lra-search-helper-status";
+      document.body.appendChild(status);
+    }
+
+    status.textContent =
+      helperCount > 0
+        ? `Referral helper v${EXTENSION_VERSION} · ${helperCount} rows`
+        : `Referral helper v${EXTENSION_VERSION} · waiting for rows`;
+  }
+
+  function removeSearchStatus() {
+    document.getElementById(SEARCH_STATUS_ID)?.remove();
   }
 
   function extractPersonNameFromRow(row) {
@@ -1692,6 +1744,24 @@
       .${ROW_HELPER_CLASS}:disabled {
         cursor: default;
         opacity: 0.75;
+      }
+
+      #${SEARCH_STATUS_ID}.lra-search-helper-status {
+        background: #111827;
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        border-radius: 999px;
+        bottom: 16px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+        color: #fff;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        left: 16px;
+        line-height: 18px;
+        padding: 8px 12px;
+        pointer-events: none;
+        position: fixed;
+        z-index: 2147483647;
       }
 
       #${MODAL_HELPER_ID}.lra-modal-note-helper {

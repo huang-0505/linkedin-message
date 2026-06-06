@@ -11,12 +11,18 @@ function runContentScript({
   meta = {},
   canonical = "",
   description = "",
+  jobHeader = null,
+  embeddedSources = [],
 } = {}) {
+  const titleEl = jobHeader ? makeJobTitleElement(jobHeader) : null;
   const descriptionEl = description
     ? { innerText: description, textContent: description, getBoundingClientRect: visibleRect }
     : null;
   const document = {
     title,
+    documentElement: {
+      innerHTML: embeddedSources.join("\n"),
+    },
     innerText: "",
     textContent: "",
     querySelector(selector) {
@@ -41,6 +47,15 @@ function runContentScript({
       return null;
     },
     querySelectorAll(selector) {
+      if (titleEl && selector === "h1") {
+        return [titleEl];
+      }
+      if (selector === "code, script") {
+        return embeddedSources.map((source) => ({
+          innerText: source,
+          textContent: source,
+        }));
+      }
       if (
         descriptionEl &&
         [
@@ -69,6 +84,58 @@ function runContentScript({
 
 function visibleRect() {
   return { width: 100, height: 100 };
+}
+
+function makeJobTitleElement(jobHeader) {
+  const anchor = {
+    href: jobHeader.companyHref,
+    innerText: jobHeader.company,
+    textContent: jobHeader.company,
+    outerHTML: `<a href="${jobHeader.companyHref}">${jobHeader.company}</a>`,
+    getAttribute(name) {
+      return name === "href" ? jobHeader.companyHref : "";
+    },
+    getAttributeNames() {
+      return ["href"];
+    },
+    getBoundingClientRect: visibleRect,
+  };
+
+  const headerRoot = {
+    innerText: [
+      jobHeader.jobTitle,
+      jobHeader.company,
+      jobHeader.location || "New York, NY",
+      "Easy Apply",
+    ].join("\n"),
+    textContent: [
+      jobHeader.jobTitle,
+      jobHeader.company,
+      jobHeader.location || "New York, NY",
+      "Easy Apply",
+    ].join("\n"),
+    outerHTML: `<section><h1>${jobHeader.jobTitle}</h1>${anchor.outerHTML}</section>`,
+    parentElement: null,
+    closest() {
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector.includes("/company/") || selector.includes("company-name")
+        ? [anchor]
+        : [];
+    },
+    getBoundingClientRect: visibleRect,
+  };
+
+  return {
+    innerText: jobHeader.jobTitle,
+    textContent: jobHeader.jobTitle,
+    parentElement: headerRoot,
+    closest() {
+      return headerRoot;
+    },
+    getBoundingClientRect: visibleRect,
+  };
 }
 
 const titleResult = runContentScript({
@@ -112,5 +179,22 @@ const unknownResult = runContentScript({
 });
 assert.equal(unknownResult.sponsorshipStatus, "unknown");
 assert.equal(unknownResult.sponsorshipEvidence, "");
+
+const companyIdResult = runContentScript({
+  jobHeader: {
+    jobTitle: "Engineering Manager",
+    company: "Freddie Mac",
+    companyHref: "https://www.linkedin.com/company/freddie-mac/",
+  },
+  embeddedSources: [
+    '{"name":"Freddie Mac","entityUrn":"urn:li:fsd_company:1128","url":"https://www.linkedin.com/company/freddie-mac/"}',
+  ],
+});
+assert.equal(companyIdResult.company, "Freddie Mac");
+assert.equal(companyIdResult.companyLinkedInId, "1128");
+assert.equal(
+  companyIdResult.companyLinkedInUrl,
+  "https://www.linkedin.com/company/freddie-mac/",
+);
 
 console.log("content extraction tests passed");

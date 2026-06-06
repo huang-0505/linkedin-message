@@ -236,13 +236,17 @@
       if (companyName && text && !sameCompanyText(text, companyName)) continue;
 
       const href = anchor.href || anchor.getAttribute("href") || "";
+      const url = canonicalCompanyUrl(href);
       return {
-        id: companyIdFromElement(anchor),
-        url: canonicalCompanyUrl(href),
+        id: companyIdFromElement(anchor) || companyIdFromDocument(companyName, url, root),
+        url,
       };
     }
 
-    return { id: companyIdFromElement(root), url: "" };
+    return {
+      id: companyIdFromElement(root) || companyIdFromDocument(companyName, "", root),
+      url: "",
+    };
   }
 
   function sameCompanyText(a, b) {
@@ -266,8 +270,82 @@
     return companyIdFromText(parts.join(" "));
   }
 
+  function companyIdFromDocument(companyName, companyUrl, root) {
+    const rootHtml = root?.outerHTML || root?.innerHTML || "";
+    const scopedId = companyIdFromText(rootHtml.slice(0, 120000));
+    if (scopedId) return scopedId;
+
+    const references = companyReferences(companyName, companyUrl);
+    if (!references.length) return "";
+
+    for (const source of pageDataSources()) {
+      if (!/\bcompany\b/i.test(source)) continue;
+
+      for (const slice of companyReferenceSlices(source, references)) {
+        const id = companyIdFromText(slice);
+        if (id) return id;
+      }
+    }
+
+    return "";
+  }
+
+  function pageDataSources() {
+    const sources = [];
+    const documentHtml = document.documentElement?.innerHTML || "";
+    if (documentHtml) sources.push(documentHtml);
+
+    for (const el of document.querySelectorAll("code, script")) {
+      const text = el.textContent || el.innerText || "";
+      if (text) sources.push(text);
+    }
+
+    return sources;
+  }
+
+  function companyReferences(companyName, companyUrl) {
+    const refs = new Set();
+    const name = cleanText(companyName);
+    const slug = companySlugFromUrl(companyUrl);
+
+    if (name) {
+      refs.add(name.toLowerCase());
+      refs.add(encodeURIComponent(name).toLowerCase());
+      refs.add(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
+    }
+
+    if (slug) {
+      refs.add(slug.toLowerCase());
+      refs.add(safeDecodeURIComponent(slug).toLowerCase());
+    }
+
+    return Array.from(refs).filter((ref) => ref.length >= 3);
+  }
+
+  function companyReferenceSlices(source, references) {
+    const slices = [];
+    const lower = source.toLowerCase();
+
+    for (const ref of references) {
+      let index = lower.indexOf(ref);
+      let count = 0;
+
+      while (index !== -1 && count < 6) {
+        slices.push(source.slice(Math.max(0, index - 5000), index + 5000));
+        index = lower.indexOf(ref, index + ref.length);
+        count += 1;
+      }
+    }
+
+    return slices;
+  }
+
   function companyIdFromText(text) {
-    const decoded = safeDecodeURIComponent(text || "");
+    const decoded = safeDecodeURIComponent(text || "")
+      .replace(/\\u002F/gi, "/")
+      .replace(/\\u003A/gi, ":")
+      .replace(/\\u0026/gi, "&")
+      .replace(/&quot;/gi, '"');
     return (
       decoded.match(/urn:li:(?:fsd_)?company:(\d+)/i)?.[1] ||
       decoded.match(/[?&](?:companyId|currentCompany)=\[?"?(\d+)/i)?.[1] ||
@@ -276,12 +354,21 @@
     );
   }
 
-  function canonicalCompanyUrl(href) {
+  function companySlugFromUrl(href) {
     try {
       const url = new URL(href, window.location.href);
       const parts = url.pathname.split("/").filter(Boolean);
       const companyIndex = parts.indexOf("company");
-      const slug = companyIndex !== -1 ? parts[companyIndex + 1] || "" : "";
+      return companyIndex !== -1 ? parts[companyIndex + 1] || "" : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function canonicalCompanyUrl(href) {
+    try {
+      const url = new URL(href, window.location.href);
+      const slug = companySlugFromUrl(url.href);
       return slug ? `https://www.linkedin.com/company/${slug}/` : "";
     } catch (_) {
       return "";

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "LinkedIn Referral Assistant",
-  "version": "0.1.0",
-  "description": "Personal-use helper. Extracts the current LinkedIn job page and opens your local Referral Assistant web app.",
+  "version": "0.2.0",
+  "description": "Personal-use helper for LinkedIn referrals, current-company search, and manual connect-note filling.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
     "https://www.linkedin.com/*",
