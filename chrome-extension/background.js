@@ -134,6 +134,7 @@ async function openProfileTab(rawUrl) {
     throw new Error("Invalid LinkedIn profile URL.");
   }
   await chrome.tabs.create({ url, active: true });
+  console.info("[CN] profile opened", { url });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -143,7 +144,8 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (info.status !== "complete" || !isLinkedInActionUrl(tab.url)) return;
+  if (!isLinkedInActionUrl(tab.url)) return;
+  if (info.status !== "loading" && info.status !== "complete") return;
   ensurePageAction(tabId).catch((error) =>
     console.warn("LinkedIn page action inject failed", error),
   );

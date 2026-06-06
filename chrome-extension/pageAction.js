@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.5.0";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V16__";
+  const EXTENSION_VERSION = "0.5.2";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V18__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -50,6 +50,7 @@
   let cachedWeeklyBlockUntil = 0;
   let autoConnectAttempted = false;
   let profileConnectCandidateDumped = false;
+  let lastProfileLoadLogUrl = "";
 
   if (typeof window[REFRESH_KEY] === "function") {
     window[REFRESH_KEY]();
@@ -121,6 +122,7 @@
     updateProfileConnectStatus(mode);
 
     if (mode === "profile") {
+      logProfilePageActionLoaded();
       maybeAutoOpenConnect();
     }
 
@@ -220,6 +222,30 @@
     if (/couldn'?t read|couldn'?t find/i.test(text)) return "Select job first";
     if (/extension context/i.test(text)) return "Reload extension";
     return "Try again";
+  }
+
+  function cnLog(step, detail) {
+    try {
+      if (typeof detail === "undefined") console.info(`[CN] ${step}`);
+      else console.info(`[CN] ${step}`, detail);
+    } catch (_) {}
+  }
+
+  function cnFail(reason, detail) {
+    try {
+      if (typeof detail === "undefined") console.warn(`[CN] failed: ${reason}`);
+      else console.warn(`[CN] failed: ${reason}`, detail);
+    } catch (_) {}
+  }
+
+  function logProfilePageActionLoaded() {
+    if (lastProfileLoadLogUrl === window.location.href) return;
+    lastProfileLoadLogUrl = window.location.href;
+    cnLog("pageAction loaded on profile", {
+      slug: profileSlug(),
+      url: window.location.href,
+      version: EXTENSION_VERSION,
+    });
   }
 
   async function copyActiveOutreachNote() {
@@ -903,19 +929,23 @@
 
   async function maybeAutoOpenConnect() {
     if (autoConnectAttempted) return;
-    autoConnectAttempted = true;
     const slug = profileSlug();
-    if (!slug) return;
+    if (!slug) {
+      cnFail("missing profile slug", { url: window.location.href });
+      return;
+    }
 
-    const intent = await consumePendingIntent(slug);
+    const intent = await waitForPendingIntent(slug, 5000);
     if (!intent) {
       // No pending intent — this profile tab wasn't opened by our extension.
       // Don't show an error banner; just return quietly.
       return;
     }
+    autoConnectAttempted = true;
 
     // Diagnostic: also log to console so user can verify in DevTools.
     try { console.info("[Connect+Note] auto-open running for", slug, intent); } catch (_) {}
+    cnLog("intent consumed", { slug, profileUrl: intent.profileUrl, name: intent.name });
 
     activeRecipientName = intent.name || "";
     activeRecipientNameSavedAt = Date.now();
@@ -923,16 +953,19 @@
 
     const connectClicked = await clickProfileConnectAction(26000);
     if (!connectClicked) {
+      cnFail("connect button not found", { slug, url: window.location.href });
       setAutoConnectStatus("Connect + Note: LinkedIn does not show Connect for this profile.", true);
       return;
     }
 
     const dialog = await waitForConnectModal(8000);
     if (!dialog) {
+      cnFail("connect modal not found", { slug });
       setAutoConnectStatus("Connect + Note: invite modal didn't open.", true);
       return;
     }
     if (checkWeeklyLimitModal(dialog)) {
+      cnFail("weekly invitation limit hit", { slug });
       setAutoConnectStatus("Connect + Note: LinkedIn weekly invitation limit hit.", true);
       return;
     }
@@ -976,6 +1009,16 @@
     return null;
   }
 
+  async function waitForPendingIntent(slug, timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const intent = await consumePendingIntent(slug);
+      if (intent) return intent;
+      await sleep(150);
+    }
+    return null;
+  }
+
   async function clickProfileConnectAction(timeoutMs) {
     const startedAt = Date.now();
     let lastMoreAttemptAt = 0;
@@ -983,21 +1026,25 @@
     while (Date.now() - startedAt < timeoutMs) {
       const directConnect = findProfileConnectButton();
       if (directConnect) {
+        cnLog("connect button found", describeActionElement(directConnect));
         setAutoConnectStatus("Connect + Note: opening invite modal...");
         clickElement(directConnect);
+        cnLog("connect clicked", describeActionElement(directConnect));
         return true;
       }
 
       const moreButton = findProfileMoreButton();
-      if (moreButton && Date.now() - lastMoreAttemptAt > 2500) {
+      if (moreButton && Date.now() - lastMoreAttemptAt > 1200) {
         lastMoreAttemptAt = Date.now();
         setAutoConnectStatus("Connect + Note: checking More menu...");
         clickElement(moreButton);
 
-        const menuConnect = await waitForMenuConnectAction(2800);
+        const menuConnect = await waitForMenuConnectAction(1800);
         if (menuConnect) {
+          cnLog("connect button found", describeActionElement(menuConnect));
           setAutoConnectStatus("Connect + Note: opening invite modal...");
           clickElement(menuConnect);
+          cnLog("connect clicked", describeActionElement(menuConnect));
           return true;
         }
       }
@@ -1116,24 +1163,52 @@
   }
 
   function findProfileMoreButton() {
-    const candidates = actionElements(document).filter((el) => {
+    const topCard = profileActionCandidates().filter((el) => isTopCardActionCandidate(el));
+    const fallback = actionElements(document).filter((el) => isTopCardActionCandidate(el));
+    const candidates = dedupeElements([...topCard, ...fallback]);
+
+    return candidates.find((el) => {
+      const label = profileActionLabel(el).toLowerCase();
+      const text = cleanText(el.innerText || el.textContent || "");
+      if (/^more$/i.test(text)) return true;
+      if (/\bmore\b/.test(label) && /\b(action|option|menu|overflow|more)\b/.test(label)) return true;
+      if (/\b(open|show)\b.*\b(action|option|menu|more)\b/.test(label)) return true;
+      if (/\boverflow\b/.test(label)) return true;
+      return false;
+    });
+  }
+
+  function isTopCardActionCandidate(el) {
       if (!isVisible(el)) return false;
       if (el.classList.contains(ROW_BUTTON_CLASS)) return false;
       if (el.classList.contains(ROW_HELPER_CLASS)) return false;
       if (el.closest("aside, .scaffold-layout__aside, nav, .global-nav, header.global-nav, .artdeco-modal, [data-chameleon-result-urn], .entity-result, .reusable-search__result-container, .pv-browsemap-section, .similar-profiles, .more-profiles, footer")) return false;
+      const rect = el.getBoundingClientRect();
+      // Profile CTAs live near the top. This avoids clicking unrelated "More"
+      // controls lower in the profile while still allowing sticky/top-card shifts.
+      if (rect.top > 760) return false;
       return true;
-    });
+  }
 
-    return candidates.find((el) => {
-      const text = cleanText(el.innerText || el.textContent || "");
-      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      if (/^more$/i.test(text)) return true;
-      if (/^more actions?$/.test(aria)) return true;
-      if (/\bmore options?\b/.test(aria)) return true;
-      if (/^open menu$/.test(aria)) return true;
-      // Three-dot icon-only buttons commonly use these patterns.
-      if (/\boverflow\b/.test(aria)) return true;
-      return false;
+  function profileActionLabel(el) {
+    const svgLabels = Array.from(el.querySelectorAll?.("svg, title, use") || [])
+      .map((node) =>
+        [
+          node.getAttribute?.("aria-label") || "",
+          node.getAttribute?.("title") || "",
+          node.textContent || "",
+        ].join(" "),
+      )
+      .join(" ");
+    return cleanText([buttonLabel(el), svgLabels].join(" "));
+  }
+
+  function dedupeElements(elements) {
+    const seen = new Set();
+    return elements.filter((el) => {
+      if (!el || seen.has(el)) return false;
+      seen.add(el);
+      return true;
     });
   }
 
@@ -1257,6 +1332,7 @@
       const filled = await fillConnectModalNote(dialog, modalHelper);
       button.textContent = filled ? "Note filled" : "Modal ready";
     } catch (error) {
+      cnFail(error?.message || String(error), { scope: "row", kind });
       button.textContent = rowHelperErrorText(error);
       button.title = error?.message || String(error);
     } finally {
@@ -1280,9 +1356,15 @@
       chrome.runtime.sendMessage(
         { type: "LRA_OPEN_PROFILE_TAB", url: profileUrl },
         (response) => {
-          // No-op; we just need the message to fire. Errors are swallowed.
-          void response;
-          void chrome.runtime.lastError;
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError || !response?.ok) {
+            cnFail("profile open failed", {
+              profileUrl,
+              error: runtimeError?.message || response?.error || "unknown",
+            });
+          } else {
+            cnLog("profile opened", { profileUrl });
+          }
         },
       );
       sent = true;
@@ -1290,13 +1372,16 @@
     if (sent) return;
     try {
       window.open(profileUrl, "_blank", "noopener,noreferrer");
+      cnLog("profile opened", { profileUrl, fallback: "window.open" });
     } catch (_) {}
   }
 
   async function tryOpenNativeConnect(row) {
     const directConnect = findNativeConnectAction(row);
     if (directConnect) {
+      cnLog("connect button found", describeActionElement(directConnect));
       clickElement(directConnect);
+      cnLog("connect clicked", describeActionElement(directConnect));
       return true;
     }
 
@@ -1308,7 +1393,9 @@
     const menuConnect = await waitForMenuAction(/\bconnect\b/i);
     if (!menuConnect) return false;
 
+    cnLog("connect button found", describeActionElement(menuConnect));
     clickElement(menuConnect);
+    cnLog("connect clicked", describeActionElement(menuConnect));
     return true;
   }
 
@@ -1371,6 +1458,24 @@
     );
   }
 
+  function describeActionElement(el) {
+    if (!el) return {};
+    const rect = (() => {
+      try {
+        const r = el.getBoundingClientRect();
+        return `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`;
+      } catch (_) {
+        return "";
+      }
+    })();
+    return {
+      tag: el.tagName || "",
+      label: buttonLabel(el).slice(0, 140),
+      href: (el.href || el.getAttribute?.("href") || "").slice(0, 180),
+      rect,
+    };
+  }
+
   async function waitForMenuAction(pattern, timeoutMs = 1600) {
     const startedAt = Date.now();
 
@@ -1421,6 +1526,9 @@
       if (dialog) {
         // If LinkedIn opened the weekly-limit modal, snapshot the block immediately.
         checkWeeklyLimitModal(dialog);
+        cnLog("modal found", {
+          text: cleanText(dialog.innerText || dialog.textContent || "").slice(0, 180),
+        });
         return dialog;
       }
       await sleep(120);
@@ -1481,7 +1589,12 @@
     return dialogs.find((dialog) => {
       if (!isVisible(dialog)) return false;
       const text = cleanText(dialog.innerText || dialog.textContent || "");
-      return /\b(add a note|send invitation|invitation)\b/i.test(text);
+      if (/\b(add a note|add note|include a note|send invitation|invitation|personalize invite|personalize invitation|customize invitation|connect with)\b/i.test(text)) {
+        return true;
+      }
+      if (findVisibleNoteTextarea(dialog)) return true;
+      if (findAddNoteButton(dialog)) return true;
+      return false;
     });
   }
 
@@ -1649,7 +1762,10 @@
         const addNoteButton =
           findAddNoteButton(dialog) ||
           findButtonByText(dialog, /\b(personalize|customize)\b/i);
-        if (addNoteButton) clickElement(addNoteButton);
+        if (addNoteButton) {
+          clickElement(addNoteButton);
+          cnLog("add note clicked", describeActionElement(addNoteButton));
+        }
         field = await waitForNoteTextField(dialog, 3000);
       }
       if (!field) {
@@ -1657,20 +1773,26 @@
         // during modal mount.
         await sleep(400);
         const retryAddNote = findAddNoteButton(dialog);
-        if (retryAddNote) clickElement(retryAddNote);
+        if (retryAddNote) {
+          clickElement(retryAddNote);
+          cnLog("add note clicked", describeActionElement(retryAddNote));
+        }
         field = await waitForNoteTextField(dialog, 2000);
       }
 
       if (!field) throw new Error("No note field.");
 
+      cnLog("textarea found", describeActionElement(field));
       fillTextField(field, note);
       try { field.focus(); } catch (_) {}
       clearConnectIntent();
       showConnectStatus("Connect + Note: note filled. Click Send.");
       helper.textContent = "Note filled";
       onModalNoteFilled(dialog);
+      cnLog("note filled", { chars: note.length });
       return true;
     } catch (error) {
+      cnFail(error?.message || String(error));
       helper.textContent = modalHelperErrorText(error);
       helper.title = error?.message || String(error);
       return false;
@@ -1683,7 +1805,7 @@
   }
 
   function findAddNoteButton(dialog) {
-    return findButtonByText(dialog, /\b(add\s+(?:a\s+)?note|personalize|customize)\b/i);
+    return findButtonByText(dialog, /\b(add\s+(?:a\s+)?note|add note|include\s+(?:a\s+)?note|personalize(?:\s+invite|\s+invitation)?|customize(?:\s+invite|\s+invitation)?)\b/i);
   }
 
   function findNoteTextField(dialog) {
@@ -1703,8 +1825,12 @@
       fields.find((field) => {
         if (!isVisible(field)) return false;
         const rect = field.getBoundingClientRect();
-        // The note field is tall (>=60px). Plain <input type=text> filters are short.
-        return rect.height >= 60;
+        const tag = String(field.tagName || "").toLowerCase();
+        if (tag === "textarea") return rect.height >= 20 && rect.width >= 120;
+        if (field.getAttribute?.("contenteditable") === "true") {
+          return rect.height >= 20 && rect.width >= 120;
+        }
+        return false;
       }) || null
     );
   }
@@ -1967,30 +2093,36 @@
   // ----- Pending connect intents (cross-tab) -----------------------------------------------
 
   async function persistConnectIntent(intent) {
-    const slug = String(intent?.slug || "").trim();
+    const slug = normalizeProfileSlug(intent?.slug || "");
     if (!slug) return;
     const result = await storageGet(PENDING_INTENTS_KEY);
     const map = result?.[PENDING_INTENTS_KEY] || {};
-    map[slug] = {
+    const record = {
       name: String(intent.name || "").slice(0, 120),
       profileUrl: canonicalProfileUrlFromHref(intent.profileUrl || "") || String(intent.profileUrl || ""),
       savedAt: Number(intent.savedAt || Date.now()),
     };
+    map[slug] = record;
     await storageSet({ [PENDING_INTENTS_KEY]: map });
+    cnLog("intent saved", { slug, profileUrl: record.profileUrl, name: record.name });
     // Also keep the legacy sessionStorage intent — used by updateProfileConnectStatus.
     rememberConnectIntent({ name: map[slug].name, profileUrl: map[slug].profileUrl, savedAt: map[slug].savedAt });
   }
 
   async function consumePendingIntent(slug) {
-    const safeSlug = String(slug || "").trim();
+    const safeSlug = normalizeProfileSlug(slug || "");
     if (!safeSlug) return null;
     const result = await storageGet(PENDING_INTENTS_KEY);
     const map = result?.[PENDING_INTENTS_KEY] || {};
-    const intent = map[safeSlug];
+    const key = slugKeyCandidates(safeSlug).find((candidate) => map[candidate]);
+    const intent = key ? map[key] : null;
     if (!intent) return null;
-    delete map[safeSlug];
+    delete map[key];
     await storageSet({ [PENDING_INTENTS_KEY]: map });
-    if (Date.now() - Number(intent.savedAt || 0) > 10 * 60 * 1000) return null;
+    if (Date.now() - Number(intent.savedAt || 0) > 10 * 60 * 1000) {
+      cnFail("pending intent expired", { slug: safeSlug, key });
+      return null;
+    }
     return intent;
   }
 
@@ -3002,7 +3134,7 @@
       const url = new URL(window.location.href);
       const parts = url.pathname.split("/").filter(Boolean);
       const inIndex = parts.indexOf("in");
-      return inIndex !== -1 ? parts[inIndex + 1] || "" : "";
+      return inIndex !== -1 ? normalizeProfileSlug(parts[inIndex + 1] || "") : "";
     } catch (_) {
       return "";
     }
@@ -3013,10 +3145,30 @@
       const url = new URL(href, window.location.href);
       const parts = url.pathname.split("/").filter(Boolean);
       const inIndex = parts.indexOf("in");
-      return inIndex !== -1 ? parts[inIndex + 1] || "" : "";
+      return inIndex !== -1 ? normalizeProfileSlug(parts[inIndex + 1] || "") : "";
     } catch (_) {
       return "";
     }
+  }
+
+  function normalizeProfileSlug(slug) {
+    return String(slug || "")
+      .trim()
+      .replace(/^\/+|\/+$/g, "");
+  }
+
+  function slugKeyCandidates(slug) {
+    const raw = normalizeProfileSlug(slug);
+    const candidates = new Set([raw]);
+    try {
+      const decoded = decodeURIComponent(raw);
+      candidates.add(decoded);
+      candidates.add(encodeURIComponent(decoded));
+      candidates.add(decoded.toLowerCase());
+      candidates.add(encodeURIComponent(decoded.toLowerCase()));
+    } catch (_) {}
+    candidates.add(raw.toLowerCase());
+    return Array.from(candidates).filter(Boolean);
   }
 
   function nameFromTitle() {

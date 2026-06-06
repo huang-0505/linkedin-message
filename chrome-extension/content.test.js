@@ -848,7 +848,25 @@ async function runAsyncPageActionTests() {
     );
   }
 
-  // -- Test 12: findVisibleNoteTextarea rejects short inputs -------------------
+  // -- Test 12: cross-tab pending intent consume handles encoded slug aliases --
+  {
+    const { doc } = makePeopleSearchDocument({ rows: [] });
+    const intentMap = {
+      "maria-bel%C3%A9n": {
+        name: "Maria",
+        profileUrl: "https://www.linkedin.com/in/maria-bel%C3%A9n/",
+        savedAt: Date.now(),
+      },
+    };
+    const { exports } = loadPageAction({
+      doc,
+      storage: { "lra:pending-intents": intentMap },
+    });
+    const intent = await exports.consumePendingIntent("maria-bel\u00E9n");
+    assert.equal(intent?.name, "Maria");
+  }
+
+  // -- Test 13: findVisibleNoteTextarea accepts short LinkedIn textareas -------
   {
     const { doc } = makePeopleSearchDocument({ rows: [] });
     const { exports } = loadPageAction({ doc });
@@ -857,6 +875,12 @@ async function runAsyncPageActionTests() {
       attributes: { name: "message" },
       getAttribute(n) { return this.attributes[n] || null; },
       getBoundingClientRect: () => makeRect(400, 120),
+    };
+    const shortTextarea = {
+      tagName: "TEXTAREA",
+      attributes: { name: "message" },
+      getAttribute(n) { return this.attributes[n] || null; },
+      getBoundingClientRect: () => makeRect(400, 36),
     };
     const shortInput = {
       tagName: "INPUT",
@@ -872,6 +896,18 @@ async function runAsyncPageActionTests() {
     };
     const field = exports.findVisibleNoteTextarea(dialog);
     assert.equal(field, tallTextarea, "should find tall textarea");
+
+    const dialogShortTextarea = {
+      querySelectorAll(selector) {
+        if (selector.includes("textarea")) return [shortTextarea];
+        return [];
+      },
+    };
+    assert.equal(
+      exports.findVisibleNoteTextarea(dialogShortTextarea),
+      shortTextarea,
+      "should accept shorter real LinkedIn textarea",
+    );
 
     const dialogShortOnly = {
       querySelectorAll() { return [shortInput]; },
