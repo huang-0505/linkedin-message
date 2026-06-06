@@ -6,14 +6,21 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.4.5";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V11__";
+  const EXTENSION_VERSION = "0.5.0";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V16__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
   const ROW_HELPER_CLASS = "lra-row-connect-helper"; // legacy "CN" chip class (left for stale-cleanup)
   const ROW_BUTTON_CLASS = "lra-row-connect-button"; // row-level "Connect + Note" button
   const ROW_BUTTON_WRAP_CLASS = "lra-row-connect-button-wrap";
+  const ACTION_SELECTOR = [
+    "button",
+    "a[role='button']",
+    "a[href*='/preload/search-custom-invite/']",
+    "a[href*='/messaging/']",
+    "a[aria-label]",
+  ].join(", ");
   const MODAL_HELPER_ID = "lra-modal-note-helper";
   const SEARCH_STATUS_ID = "lra-search-helper-status";
   const CONNECT_STATUS_ID = "lra-connect-intent-status";
@@ -42,6 +49,7 @@
   let cachedSettings = null;
   let cachedWeeklyBlockUntil = 0;
   let autoConnectAttempted = false;
+  let profileConnectCandidateDumped = false;
 
   if (typeof window[REFRESH_KEY] === "function") {
     window[REFRESH_KEY]();
@@ -83,7 +91,10 @@
     const mode = currentMode();
     const urlChanged = lastUrl !== window.location.href;
     lastUrl = window.location.href;
-    if (urlChanged) autoConnectAttempted = false;
+    if (urlChanged) {
+      autoConnectAttempted = false;
+      profileConnectCandidateDumped = false;
+    }
 
     if (!mode) {
       removeButton();
@@ -497,7 +508,7 @@
   }
 
   function findVisibleNativeRowAction(row) {
-    return Array.from(row.querySelectorAll("button, a[role='button']")).find((button) => {
+    return actionElements(row).find((button) => {
       if (!isVisible(button)) return false;
       if (button.classList.contains(ROW_HELPER_CLASS)) return false;
       if (button.classList.contains(ROW_BUTTON_CLASS)) return false;
@@ -540,7 +551,7 @@
         break;
       case "messageable":
         button.textContent = "Connect + Note";
-        button.title = "Already connected? Opens profile in a new tab where Connect may be hidden.";
+        button.title = "LinkedIn only shows Message here. Opens the profile and fills a note if Connect is available there.";
         break;
       case "restricted":
         button.textContent = "Can't connect";
@@ -592,7 +603,7 @@
   }
 
   function visibleActionLabels(row) {
-    return Array.from(row.querySelectorAll("button, a[role='button']"))
+    return actionElements(row)
       .filter(
         (el) =>
           isVisible(el) &&
@@ -707,7 +718,7 @@
   }
 
   function countVisibleRowActions(row) {
-    return Array.from(row.querySelectorAll("button, a[role='button']")).filter(
+    return actionElements(row).filter(
       (button) =>
         isVisible(button) &&
         !button.classList.contains(ROW_HELPER_CLASS) &&
@@ -908,32 +919,11 @@
 
     activeRecipientName = intent.name || "";
     activeRecipientNameSavedAt = Date.now();
-    setAutoConnectStatus("Connect + Note: finding Connect button...");
+    setAutoConnectStatus("Connect + Note: finding Connect...");
 
-    // 1) Try top-level Connect. Profile pages use aria-label patterns like
-    //    "Invite Soe Than to connect" — combined label is not "Connect" alone,
-    //    so we use a flexible matcher.
-    let connectClicked = false;
-    const directConnect = await waitForProfileConnectButton(6000);
-    if (directConnect) {
-      clickElement(directConnect);
-      connectClicked = true;
-      setAutoConnectStatus("Connect + Note: opening invite modal...");
-    } else {
-      // 2) More → menu Connect.
-      setAutoConnectStatus("Connect + Note: opening More menu...");
-      const moreButton = await waitForProfileMoreButton(4000);
-      if (moreButton) {
-        clickElement(moreButton);
-        const menuConnect = await waitForMenuAction(/\bconnect\b/i, 3000);
-        if (menuConnect) {
-          clickElement(menuConnect);
-          connectClicked = true;
-        }
-      }
-    }
+    const connectClicked = await clickProfileConnectAction(26000);
     if (!connectClicked) {
-      setAutoConnectStatus("Connect + Note: Connect button not found. Click it manually.", true);
+      setAutoConnectStatus("Connect + Note: LinkedIn does not show Connect for this profile.", true);
       return;
     }
 
@@ -986,50 +976,165 @@
     return null;
   }
 
-  function findProfileConnectButton() {
-    const candidates = profileActionCandidates()
-      .filter((el) => isVisible(el) && !el.classList.contains(ROW_BUTTON_CLASS) && !el.classList.contains(ROW_HELPER_CLASS));
+  async function clickProfileConnectAction(timeoutMs) {
+    const startedAt = Date.now();
+    let lastMoreAttemptAt = 0;
 
-    // Pass 1: a button whose visible text is exactly "Connect" (ignoring icons).
+    while (Date.now() - startedAt < timeoutMs) {
+      const directConnect = findProfileConnectButton();
+      if (directConnect) {
+        setAutoConnectStatus("Connect + Note: opening invite modal...");
+        clickElement(directConnect);
+        return true;
+      }
+
+      const moreButton = findProfileMoreButton();
+      if (moreButton && Date.now() - lastMoreAttemptAt > 2500) {
+        lastMoreAttemptAt = Date.now();
+        setAutoConnectStatus("Connect + Note: checking More menu...");
+        clickElement(moreButton);
+
+        const menuConnect = await waitForMenuConnectAction(2800);
+        if (menuConnect) {
+          setAutoConnectStatus("Connect + Note: opening invite modal...");
+          clickElement(menuConnect);
+          return true;
+        }
+      }
+
+      await sleep(250);
+    }
+
+    return false;
+  }
+
+  function findProfileConnectButton() {
+    // Source candidates from BOTH the whole document AND the top-card-scoped
+    // selectors. Document gets us everything in production. The scoped scan
+    // ensures tests (which often stub only a top-card mock) still find
+    // buttons. Dedupe by identity.
+    const everything = [];
+    const seen = new Set();
+    try {
+      for (const el of actionElements(document)) {
+        if (!seen.has(el)) { seen.add(el); everything.push(el); }
+      }
+    } catch (_) {}
+    for (const el of profileActionCandidates()) {
+      if (!seen.has(el)) { seen.add(el); everything.push(el); }
+    }
+
+    const candidates = everything.filter((el) => {
+      if (!isVisible(el)) return false;
+      if (el.classList.contains(ROW_BUTTON_CLASS)) return false;
+      if (el.classList.contains(ROW_HELPER_CLASS)) return false;
+      // Exclude well-known non-top-card regions:
+      const excludedAncestor = el.closest(
+        "aside, " +
+        ".scaffold-layout__aside, " +
+        ".global-nav, " +
+        "header.global-nav, " +
+        "nav, " +
+        ".artdeco-modal, " +
+        ".feed-shared-control-menu, " +
+        "[data-chameleon-result-urn], " +
+        ".entity-result, " +
+        ".reusable-search__result-container, " +
+        ".pv-browsemap-section, " +
+        ".similar-profiles, " +
+        ".browsemap-recommendation, " +
+        ".more-profiles, " +
+        ".pv-recent-activity-section, " +
+        ".pv-recommendations-section, " +
+        "footer",
+      );
+      if (excludedAncestor) return false;
+      return true;
+    });
+
+    // Diagnostic dump so we can see exactly what's available in DevTools.
+    if (!profileConnectCandidateDumped) try {
+      profileConnectCandidateDumped = true;
+      const dump = candidates.slice(0, 25).map((el) => ({
+        text: cleanText(el.innerText || el.textContent || "").slice(0, 50),
+        aria: (el.getAttribute("aria-label") || "").slice(0, 100),
+        rect: (() => { const r = el.getBoundingClientRect(); return `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`; })(),
+      }));
+      console.info("[Connect+Note] top-card candidates (" + candidates.length + "):", dump);
+    } catch (_) {}
+
+    // Pass 1: aria-label matches LinkedIn's standard "Invite ___ to connect".
+    const aria = candidates.find((el) => {
+      const label = el.getAttribute("aria-label") || "";
+      return /\binvite\b.*\bto connect\b/i.test(label);
+    });
+    if (aria) return aria;
+
+    // Pass 2: visible text is exactly "Connect".
     const exact = candidates.find((el) => {
       const text = cleanText(el.innerText || el.textContent || "");
       return /^connect$/i.test(text);
     });
     if (exact) return exact;
 
-    // Pass 2: a button whose aria-label starts with "Invite " and contains
-    // " to connect" — LinkedIn's standard pattern.
-    const aria = candidates.find((el) => {
-      const label = el.getAttribute("aria-label") || "";
-      return /^invite\b.*\bto connect\b/i.test(label);
+    // Pass 3: text starts with "Connect" (handles "Connect now" etc.).
+    const starts = candidates.find((el) => {
+      const text = cleanText(el.innerText || el.textContent || "");
+      return /^connect\b/i.test(text) && !/\b(connected|connection)\b/i.test(text);
     });
-    if (aria) return aria;
+    if (starts) return starts;
 
-    // Pass 3: any button with "connect" anywhere in its combined label, that
-    // is NOT "follow", "message", "more", "connection(s)", or "connected".
+    // Pass 4: ANY button anywhere with "connect" in combined label, excluding
+    // disqualifying words.
     const loose = candidates.find((el) => {
       const label = buttonLabel(el).toLowerCase();
       if (!/\bconnect\b/.test(label)) return false;
-      if (/\b(connected|connections?|follow|message|more|see all|remove connection)\b/.test(label)) return false;
+      if (/\b(connected|connections?|follow|message|more|see all|remove connection|withdraw|pending|view profile|cancel|next|skip|edit|done)\b/.test(label)) return false;
       return true;
     });
-    return loose || null;
+    if (loose) return loose;
+
+    // Pass 5: last-ditch — any visible button whose icon SVG has aria-label or
+    // title containing "connect" (LinkedIn sometimes uses an icon-only button).
+    const iconOnly = candidates.find((el) => {
+      const svg = el.querySelector("svg, use");
+      if (!svg) return false;
+      const aria = (svg.getAttribute("aria-label") || svg.getAttribute("title") || "").toLowerCase();
+      return /\bconnect\b/.test(aria) && !/\b(connected|connection)\b/.test(aria);
+    });
+    return iconOnly || null;
   }
 
   async function waitForProfileMoreButton(timeoutMs) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-      const candidates = profileActionCandidates()
-        .filter((el) => isVisible(el) && !el.classList.contains(ROW_BUTTON_CLASS));
-      const match = candidates.find((el) => {
-        const text = cleanText(el.innerText || el.textContent || "");
-        const aria = el.getAttribute("aria-label") || "";
-        return /^more$/i.test(text) || /^more actions?$/i.test(aria) || /\bmore options?\b/i.test(aria);
-      });
+      const match = findProfileMoreButton();
       if (match) return match;
       await sleep(150);
     }
     return null;
+  }
+
+  function findProfileMoreButton() {
+    const candidates = actionElements(document).filter((el) => {
+      if (!isVisible(el)) return false;
+      if (el.classList.contains(ROW_BUTTON_CLASS)) return false;
+      if (el.classList.contains(ROW_HELPER_CLASS)) return false;
+      if (el.closest("aside, .scaffold-layout__aside, nav, .global-nav, header.global-nav, .artdeco-modal, [data-chameleon-result-urn], .entity-result, .reusable-search__result-container, .pv-browsemap-section, .similar-profiles, .more-profiles, footer")) return false;
+      return true;
+    });
+
+    return candidates.find((el) => {
+      const text = cleanText(el.innerText || el.textContent || "");
+      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+      if (/^more$/i.test(text)) return true;
+      if (/^more actions?$/.test(aria)) return true;
+      if (/\bmore options?\b/.test(aria)) return true;
+      if (/^open menu$/.test(aria)) return true;
+      // Three-dot icon-only buttons commonly use these patterns.
+      if (/\boverflow\b/.test(aria)) return true;
+      return false;
+    });
   }
 
   function profileActionCandidates() {
@@ -1046,7 +1151,7 @@
     const candidates = [];
     for (const root of roots) {
       if (!root?.querySelectorAll) continue;
-      for (const el of root.querySelectorAll("button, a[role='button']")) {
+      for (const el of actionElements(root)) {
         if (seen.has(el)) continue;
         seen.add(el);
         candidates.push(el);
@@ -1189,8 +1294,8 @@
   }
 
   async function tryOpenNativeConnect(row) {
-    const directConnect = findButtonByText(row, /\bconnect\b/i);
-    if (directConnect && !directConnect.classList.contains(ROW_BUTTON_CLASS)) {
+    const directConnect = findNativeConnectAction(row);
+    if (directConnect) {
       clickElement(directConnect);
       return true;
     }
@@ -1210,15 +1315,44 @@
   function findMoreButton(row) {
     return (
       findButtonByText(row, /^more$/i) ||
-      Array.from(row.querySelectorAll("button, a[role='button']")).find((button) => {
+      actionElements(row).find((button) => {
         const label = button.getAttribute("aria-label") || "";
         return isVisible(button) && /\bmore\b/i.test(label);
       })
     );
   }
 
+  function findNativeConnectAction(root) {
+    return actionElements(root).find((action) => {
+      if (!isVisible(action)) return false;
+      if (action.classList.contains(ROW_HELPER_CLASS)) return false;
+      if (action.classList.contains(ROW_BUTTON_CLASS)) return false;
+      return isNativeConnectAction(action);
+    });
+  }
+
+  function isNativeConnectAction(action) {
+    const href = action.href || action.getAttribute("href") || "";
+    if (/\/preload\/search-custom-invite\//i.test(href)) return true;
+
+    const label = buttonLabel(action);
+    if (/\binvite\b.*\bto connect\b/i.test(label)) return true;
+
+    const text = cleanText(action.innerText || action.textContent || "");
+    if (/^connect$/i.test(text)) return true;
+    if (/^connect\b/i.test(text) && !/\b(connected|connection|connections|no\s*connect|pending|withdraw)\b/i.test(text)) {
+      return true;
+    }
+    return false;
+  }
+
+  function actionElements(root) {
+    if (!root?.querySelectorAll) return [];
+    return Array.from(root.querySelectorAll(ACTION_SELECTOR));
+  }
+
   function findButtonByText(root, pattern) {
-    const buttons = Array.from(root.querySelectorAll("button, a[role='button']"));
+    const buttons = actionElements(root);
     return buttons.find((button) => {
       if (!isVisible(button)) return false;
       if (button.classList.contains(ROW_HELPER_CLASS)) return false;
@@ -1242,7 +1376,7 @@
 
     while (Date.now() - startedAt < timeoutMs) {
       const actions = Array.from(
-        document.querySelectorAll("[role='menuitem'], button, a[role='button']"),
+        document.querySelectorAll(`[role='menuitem'], ${ACTION_SELECTOR}`),
       );
       const match = actions.find(
         (action) =>
@@ -1250,6 +1384,27 @@
           !action.classList.contains(ROW_HELPER_CLASS) &&
           !action.classList.contains(ROW_BUTTON_CLASS) &&
           pattern.test(buttonLabel(action)),
+      );
+      if (match) return match;
+      await sleep(100);
+    }
+
+    return null;
+  }
+
+  async function waitForMenuConnectAction(timeoutMs = 2800) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const actions = Array.from(
+        document.querySelectorAll(`[role='menuitem'], ${ACTION_SELECTOR}`),
+      );
+      const match = actions.find(
+        (action) =>
+          isVisible(action) &&
+          !action.classList.contains(ROW_HELPER_CLASS) &&
+          !action.classList.contains(ROW_BUTTON_CLASS) &&
+          isNativeConnectAction(action),
       );
       if (match) return match;
       await sleep(100);
@@ -3038,15 +3193,6 @@
         border-color: #004182;
       }
 
-      .${ROW_BUTTON_CLASS}[data-state="messageable"] {
-        background: #fff;
-        color: #0a66c2;
-      }
-
-      .${ROW_BUTTON_CLASS}[data-state="messageable"]:hover {
-        background: #eef6ff;
-      }
-
       .${ROW_BUTTON_CLASS}[data-state="restricted"],
       .${ROW_BUTTON_CLASS}:disabled {
         background: #f3f4f6;
@@ -3241,6 +3387,7 @@
         fillConnectModalNote,
         findProfileConnectButton,
         profileActionCandidates,
+        findNativeConnectAction,
         findVisibleNoteTextarea,
         findAddNoteButton,
         checkWeeklyLimitModal,

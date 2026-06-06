@@ -245,7 +245,13 @@ function mkButton({ label = "", ariaLabel = label, visible = true } = {}) {
   return button;
 }
 
-function mkLink({ href = "https://www.linkedin.com/in/jane-doe/", text = "Jane Doe", visible = true } = {}) {
+function mkLink({
+  href = "https://www.linkedin.com/in/jane-doe/",
+  text = "Jane Doe",
+  ariaLabel = "",
+  role = "",
+  visible = true,
+} = {}) {
   return {
     tagName: "A",
     nodeType: 1,
@@ -255,8 +261,8 @@ function mkLink({ href = "https://www.linkedin.com/in/jane-doe/", text = "Jane D
     classList: makeClassList(),
     dataset: {},
     style: {},
-    attributes: { href, "aria-label": "", title: "" },
-    getAttribute(name) { return name === "href" ? href : this.attributes[name] || null; },
+    attributes: { href, "aria-label": ariaLabel, role, title: "" },
+    getAttribute(name) { return this.attributes[name] || null; },
     setAttribute(name, value) { this.attributes[name] = String(value); },
     addEventListener() {},
     contains(node) { return node === this; },
@@ -337,18 +343,44 @@ function mkRow({
     querySelectorAll(selector) {
       const parts = selector.split(",").map((s) => s.trim());
       const results = [];
+      const seen = new Set();
+      const push = (child) => {
+        if (!child || seen.has(child)) return;
+        seen.add(child);
+        results.push(child);
+      };
       for (const part of parts) {
         if (part === "a[href*=\"/in/\"]" || part.includes("a[href*=\"/in/\"]")) {
-          if (link.href.includes("/in/")) results.push(link);
+          if (link.href.includes("/in/")) push(link);
         }
-        if (part === "button, a[role='button']" || part === "button" || part.startsWith("button")) {
+        if (part === "button" || part.startsWith("button")) {
           for (const child of containerChildren) {
-            if (child.tagName === "BUTTON") results.push(child);
+            if (child.tagName === "BUTTON") push(child);
+          }
+        }
+        if (part === "a[role='button']") {
+          for (const child of containerChildren) {
+            if (child.tagName === "A" && child.getAttribute("role") === "button") push(child);
+          }
+        }
+        if (part === "a[href*='/preload/search-custom-invite/']") {
+          for (const child of containerChildren) {
+            if (child.tagName === "A" && child.href.includes("/preload/search-custom-invite/")) push(child);
+          }
+        }
+        if (part === "a[href*='/messaging/']") {
+          for (const child of containerChildren) {
+            if (child.tagName === "A" && child.href.includes("/messaging/")) push(child);
+          }
+        }
+        if (part === "a[aria-label]") {
+          for (const child of containerChildren) {
+            if (child.tagName === "A" && child.getAttribute("aria-label")) push(child);
           }
         }
         if (part.includes(".lra-row-connect-button-wrap") || part.includes("lra-row-connect-button")) {
           for (const child of containerChildren) {
-            if (child.className?.includes?.("lra-row-connect-button")) results.push(child);
+            if (child.className?.includes?.("lra-row-connect-button")) push(child);
           }
         }
         if (part.includes(".entity-result__actions") || part.includes(".search-result__actions")) {
@@ -636,6 +668,27 @@ function loadPageAction({ doc, storage = {} }) {
   assert.equal(exports.getRowKind(messageableRow), "messageable");
 }
 
+// -- Test 6: LinkedIn invite links count as native Connect actions ------------
+{
+  const inviteLink = mkLink({
+    href: "https://www.linkedin.com/preload/search-custom-invite/?vanityName=jane-doe",
+    text: "Connect",
+    ariaLabel: "Invite Jane Doe to connect",
+  });
+  const row = mkRow({
+    href: "https://www.linkedin.com/in/jane-doe/",
+    buttons: [inviteLink],
+  });
+  const { doc } = makePeopleSearchDocument({ rows: [row] });
+  const { exports } = loadPageAction({ doc });
+  assert.equal(exports.getRowKind(row), "connectable");
+  assert.equal(
+    exports.findNativeConnectAction(row),
+    inviteLink,
+    "row Connect finder should match LinkedIn invite links",
+  );
+}
+
 // -- Test 6: profile Connect finder handles LinkedIn invite aria-label --------
 {
   const { doc } = makePeopleSearchDocument({ rows: [] });
@@ -650,7 +703,7 @@ function loadPageAction({ doc, storage = {} }) {
   });
   const topCard = {
     querySelectorAll(selector) {
-      return selector === "button, a[role='button']"
+      return selector.includes("button")
         ? [messageButton, connectionsButton, inviteButton]
         : [];
     },
@@ -674,7 +727,7 @@ function loadPageAction({ doc, storage = {} }) {
   const cancel = mkButton({ label: "Cancel" });
   const dialog = {
     querySelectorAll(selector) {
-      return selector === "button, a[role='button']" ? [cancel, addNote] : [];
+      return selector.includes("button") ? [cancel, addNote] : [];
     },
   };
   const { exports } = loadPageAction({ doc });
