@@ -58,8 +58,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LRA_OPEN_PROFILE_TAB") {
+    openProfileTab(message.url)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      );
+    return true;
+  }
+
   return false;
 });
+
+async function openProfileTab(rawUrl) {
+  const url = String(rawUrl || "").trim();
+  if (!/^https:\/\/(www\.|)linkedin\.com\/in\//.test(url)) {
+    throw new Error("Invalid LinkedIn profile URL.");
+  }
+  await chrome.tabs.create({ url, active: true });
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   injectPageActionIntoOpenLinkedInTabs().catch((error) =>

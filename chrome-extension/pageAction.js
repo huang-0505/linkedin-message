@@ -6,21 +6,42 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.3.0";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V5__";
+  const EXTENSION_VERSION = "0.4.0";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V6__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
-  const ROW_HELPER_CLASS = "lra-row-connect-helper";
+  const ROW_HELPER_CLASS = "lra-row-connect-helper"; // legacy "CN" chip class (left for stale-cleanup)
+  const ROW_BUTTON_CLASS = "lra-row-connect-button"; // full-width "Connect + Note" row button
+  const ROW_BUTTON_WRAP_CLASS = "lra-row-connect-button-wrap";
   const MODAL_HELPER_ID = "lra-modal-note-helper";
   const SEARCH_STATUS_ID = "lra-search-helper-status";
   const CONNECT_STATUS_ID = "lra-connect-intent-status";
+  const RATE_BANNER_ID = "lra-rate-banner";
+  const SETTINGS_POPOVER_ID = "lra-rate-settings-popover";
   const ACTIVE_OUTREACH_CONTEXT_KEY = "lra:active-outreach-context";
-  const CONNECT_INTENT_KEY = "lra:connect-intent";
+  const CONNECT_INTENT_KEY = "lra:connect-intent"; // legacy per-tab key (still set for backward compat)
+  const PENDING_INTENTS_KEY = "lra:pending-intents"; // cross-tab map of { [slug]: { name, profileUrl, savedAt } }
+  const INVITE_STATS_KEY = "lra:invite-stats";
+  const INVITE_SETTINGS_KEY = "lra:invite-settings";
+  const WEEKLY_BLOCK_KEY = "lra:weekly-block-until";
+  const DEFAULT_SETTINGS = Object.freeze({
+    dailyCap: 20,
+    weeklyCap: 100,
+    minDelayMs: 8000,
+    maxJitterMs: 7000,
+  });
   let lastUrl = "";
   let injectTimer = 0;
   let activeRecipientName = "";
   let activeRecipientNameSavedAt = 0;
+  let lastSentAtMs = 0;
+  let currentJitterMs = 0;
+  let cooldownTickTimer = 0;
+  let cachedStats = null;
+  let cachedSettings = null;
+  let cachedWeeklyBlockUntil = 0;
+  let autoConnectAttempted = false;
 
   if (typeof window[REFRESH_KEY] === "function") {
     window[REFRESH_KEY]();
@@ -60,28 +81,37 @@
     }
 
     const mode = currentMode();
+    const urlChanged = lastUrl !== window.location.href;
     lastUrl = window.location.href;
+    if (urlChanged) autoConnectAttempted = false;
 
     if (!mode) {
       removeButton();
       removeSearchStatus();
       removeConnectStatus();
+      removeRateBanner();
       return;
     }
 
     restoreConnectIntentName();
     injectConnectModalHelper();
+    ensureInviteContextLoaded();
 
     if (mode === "search") {
       removeButton();
       removeConnectStatus();
-      const helperCount = injectSearchResultHelpers();
-      updateSearchStatus(helperCount);
+      removeSearchStatus();
+      injectSearchResultHelpers();
       return;
     }
 
     removeSearchStatus();
+    removeRateBanner();
     updateProfileConnectStatus(mode);
+
+    if (mode === "profile") {
+      maybeAutoOpenConnect();
+    }
 
     const existing = document.getElementById(BUTTON_ID);
     if (existing && existing.dataset.mode === mode && !force) return;
@@ -211,61 +241,164 @@
   }
 
   function injectSearchResultHelpers() {
-    let helperCount = 0;
+    // Evict legacy "CN" chips from prior extension versions.
+    document
+      .querySelectorAll(`.${ROW_HELPER_CLASS}:not(#${MODAL_HELPER_ID})`)
+      .forEach((el) => el.remove());
 
-    for (const { row, actionButton } of searchResultActionTargets().slice(0, 40)) {
-      const existingHelper = helperForActionButton(actionButton);
-      if (existingHelper?.dataset.lraVersion === EXTENSION_VERSION) {
-        helperCount += 1;
-        continue;
-      }
-      existingHelper?.remove();
-
-      if (!actionButton?.parentElement) continue;
-
-      const helper = document.createElement("button");
-      helper.type = "button";
-      helper.className = ROW_HELPER_CLASS;
-      helper.dataset.lraVersion = EXTENSION_VERSION;
-      helper.dataset.lraActionFor = rowActionKind(actionButton) || "unknown";
-      helper.textContent = "CN";
-      helper.title =
-        "Connect + note. If LinkedIn does not expose Connect here, open the profile with your note ready.";
-      helper.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        handleRowConnectClick(row, helper, actionButton);
-      });
-
-      actionButton.parentElement.insertBefore(helper, actionButton);
-      helperCount += 1;
+    let attached = 0;
+    const weeklyBlocked = isWeeklyBlocked();
+    const cooldown = remainingCooldownMs();
+    for (const row of findPeopleSearchRows()) {
+      if (ensureRowConnectButton(row, { weeklyBlocked, cooldown })) attached += 1;
     }
-
-    return helperCount;
+    refreshRateBanner();
+    return attached;
   }
 
-  function searchResultActionTargets() {
-    const targets = [];
-    const seenButtons = new Set();
+  function findPeopleSearchRows() {
     const main = document.querySelector("main") || document.body;
-    const actionButtons = Array.from(
-      main.querySelectorAll("button, a[role='button']"),
-    ).filter((button) => {
-      if (!isVisible(button)) return false;
-      if (button.classList.contains(ROW_HELPER_CLASS)) return false;
-      return /\b(message|connect|follow)\b/i.test(buttonLabel(button));
+    let rows = Array.from(
+      main.querySelectorAll(
+        "[data-view-name='search-entity-result-universal-template']",
+      ),
+    );
+    if (rows.length === 0) {
+      rows = Array.from(
+        main.querySelectorAll(
+          ".reusable-search__result-container, .entity-result, .search-result",
+        ),
+      );
+    }
+    // De-dupe (a single row can match multiple selectors via different ancestors).
+    const seen = new Set();
+    const unique = [];
+    for (const row of rows) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      unique.push(row);
+    }
+    return unique.filter((row) => {
+      if (!isVisible(row)) return false;
+      const link = row.querySelector('a[href*="/in/"]');
+      if (!link) return false;
+      return isLikelyPeopleSearchRow(row, link);
     });
+  }
 
-    for (const actionButton of actionButtons) {
-      if (seenButtons.has(actionButton)) continue;
-      const row = closestSearchResultRow(actionButton);
-      if (!row || !isVisible(row)) continue;
+  function ensureRowConnectButton(row, ctx) {
+    const slug = profileSlugFromHref(profileUrlFromRow(row));
+    const kind = getRowKind(row);
 
-      seenButtons.add(actionButton);
-      targets.push({ row, actionButton });
+    let wrap = row.querySelector(`.${ROW_BUTTON_WRAP_CLASS}`);
+    let button = wrap?.querySelector(`.${ROW_BUTTON_CLASS}`);
+
+    if (button && button.dataset.lraVersion === EXTENSION_VERSION && button.dataset.lraSlug === slug) {
+      applyRowButtonState(button, kind, ctx);
+      return true;
     }
 
-    return targets;
+    if (wrap) wrap.remove();
+
+    wrap = document.createElement("div");
+    wrap.className = ROW_BUTTON_WRAP_CLASS;
+
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = ROW_BUTTON_CLASS;
+    button.dataset.lraVersion = EXTENSION_VERSION;
+    button.dataset.lraSlug = slug;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      handleRowConnectClick(row, button);
+    });
+
+    wrap.appendChild(button);
+
+    const target =
+      row.querySelector(".entity-result__actions") ||
+      row.querySelector(".reusable-search-simple-insight") ||
+      row.querySelector(".search-result__actions") ||
+      row.querySelector(".entity-result__content") ||
+      row;
+    target.appendChild(wrap);
+
+    applyRowButtonState(button, kind, ctx);
+    return true;
+  }
+
+  function applyRowButtonState(button, kind, ctx) {
+    button.dataset.state = kind;
+    button.title = "";
+    switch (kind) {
+      case "connectable":
+        button.textContent = "Connect + Note";
+        button.title = "Open invite modal with your outreach note pre-filled.";
+        break;
+      case "messageable":
+        button.textContent = "Connect + Note";
+        button.title = "Already connected? Opens profile in a new tab where Connect may be hidden.";
+        break;
+      case "restricted":
+        button.textContent = "Can't connect";
+        button.title = "LinkedIn restricts Connect for this person. Click to open profile in a new tab.";
+        break;
+      default:
+        button.textContent = "Connect + Note";
+        button.title = "Opens profile in a new tab to find the Connect action.";
+    }
+
+    if (ctx?.weeklyBlocked) {
+      button.disabled = true;
+      button.title = "LinkedIn weekly invitation limit hit — buttons paused.";
+      return;
+    }
+
+    if (kind === "restricted") {
+      // We still allow clicking (opens profile in new tab) but visually disabled.
+      button.disabled = false;
+      return;
+    }
+
+    if (ctx && ctx.cooldown && ctx.cooldown > 0) {
+      button.disabled = true;
+      button.dataset.cooldown = "true";
+      const seconds = Math.ceil(ctx.cooldown / 1000);
+      button.textContent = `Wait ${seconds}s...`;
+    } else {
+      button.disabled = false;
+      delete button.dataset.cooldown;
+    }
+  }
+
+  function getRowKind(row) {
+    if (!row) return "unknown";
+    const profileUrl = profileUrlFromRow(row);
+    if (!profileUrl) return "restricted";
+
+    const labels = visibleActionLabels(row);
+    const labelText = labels.join(" | ");
+
+    if (/\bno\s*connect\b/i.test(labelText) || /\bno\s*connect\b/i.test(cleanText(row.innerText || row.textContent || ""))) {
+      return "restricted";
+    }
+    if (/\bconnect\b/i.test(labelText)) return "connectable";
+    if (/\bmore\b/i.test(labelText)) return "connectable"; // Connect likely hidden under More.
+    if (/\bmessage\b/i.test(labelText)) return "messageable";
+    return "unknown";
+  }
+
+  function visibleActionLabels(row) {
+    return Array.from(row.querySelectorAll("button, a[role='button']"))
+      .filter(
+        (el) =>
+          isVisible(el) &&
+          !el.classList.contains(ROW_BUTTON_CLASS) &&
+          !el.classList.contains(ROW_HELPER_CLASS),
+      )
+      .map((el) => buttonLabel(el))
+      .filter(Boolean);
   }
 
   function closestSearchResultRow(seed) {
@@ -323,24 +456,6 @@
     ).length;
   }
 
-  function helperForActionButton(actionButton) {
-    let node = actionButton.previousElementSibling;
-    while (node) {
-      if (node.classList?.contains(ROW_HELPER_CLASS)) return node;
-      if (isVisible(node)) return null;
-      node = node.previousElementSibling;
-    }
-    return null;
-  }
-
-  function rowActionKind(actionButton) {
-    const label = buttonLabel(actionButton);
-    if (/\bconnect\b/i.test(label)) return "connect";
-    if (/\bmessage\b/i.test(label)) return "message";
-    if (/\bfollow\b/i.test(label)) return "follow";
-    return "";
-  }
-
   function updateSearchStatus(helperCount) {
     let status = document.getElementById(SEARCH_STATUS_ID);
     if (!status) {
@@ -358,6 +473,206 @@
 
   function removeSearchStatus() {
     document.getElementById(SEARCH_STATUS_ID)?.remove();
+  }
+
+  // ----- Rate banner / settings popover -----------------------------------------------
+
+  let inviteContextLoaded = false;
+  async function ensureInviteContextLoaded() {
+    if (inviteContextLoaded) return;
+    inviteContextLoaded = true;
+    try {
+      await Promise.all([inviteStats(), inviteSettings(), loadWeeklyBlock()]);
+      refreshRateBanner();
+    } catch (error) {
+      console.warn("Connect+Note: failed to load invite context", error);
+    }
+  }
+
+  function refreshRateBanner() {
+    if (currentMode() !== "search") {
+      removeRateBanner();
+      return;
+    }
+
+    const stats = inviteStatsSnapshot();
+    const settings = inviteSettingsSnapshot();
+    const blocked = isWeeklyBlocked();
+
+    let banner = document.getElementById(RATE_BANNER_ID);
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = RATE_BANNER_ID;
+      banner.className = "lra-rate-banner";
+      document.body.appendChild(banner);
+    }
+
+    banner.dataset.blocked = blocked ? "true" : "false";
+    banner.innerHTML = "";
+
+    if (blocked) {
+      const warn = document.createElement("span");
+      warn.textContent = "⚠ Weekly invitation limit hit — buttons paused.";
+      banner.appendChild(warn);
+
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "lra-rate-settings";
+      clear.textContent = "Clear block";
+      clear.addEventListener("click", (event) => {
+        event.preventDefault();
+        clearWeeklyBlock();
+      });
+      banner.appendChild(clear);
+    } else {
+      const status = document.createElement("span");
+      status.textContent = `Connect + Note · ${stats.todayCount}/${settings.dailyCap} today · ${stats.weekCount}/${settings.weeklyCap} week`;
+      banner.appendChild(status);
+
+      const minus = document.createElement("button");
+      minus.type = "button";
+      minus.className = "lra-rate-settings";
+      minus.textContent = "−1";
+      minus.title = "Decrement counter (if you cancelled without sending).";
+      minus.addEventListener("click", (event) => {
+        event.preventDefault();
+        adjustInviteCount(-1);
+      });
+      banner.appendChild(minus);
+
+      const gear = document.createElement("button");
+      gear.type = "button";
+      gear.className = "lra-rate-settings";
+      gear.textContent = "⚙";
+      gear.title = "Connect + Note settings";
+      gear.addEventListener("click", (event) => {
+        event.preventDefault();
+        toggleSettingsPopover();
+      });
+      banner.appendChild(gear);
+    }
+  }
+
+  function removeRateBanner() {
+    document.getElementById(RATE_BANNER_ID)?.remove();
+    document.getElementById(SETTINGS_POPOVER_ID)?.remove();
+  }
+
+  function toggleSettingsPopover() {
+    const existing = document.getElementById(SETTINGS_POPOVER_ID);
+    if (existing) {
+      existing.remove();
+      return;
+    }
+
+    const settings = inviteSettingsSnapshot();
+    const popover = document.createElement("div");
+    popover.id = SETTINGS_POPOVER_ID;
+    popover.className = "lra-rate-settings-popover";
+
+    const heading = document.createElement("div");
+    heading.className = "lra-rate-settings-heading";
+    heading.textContent = "Connect + Note settings";
+    popover.appendChild(heading);
+
+    const capRow = document.createElement("label");
+    capRow.className = "lra-rate-settings-row";
+    capRow.textContent = "Daily cap: ";
+    const capInput = document.createElement("input");
+    capInput.type = "number";
+    capInput.min = "1";
+    capInput.max = "100";
+    capInput.value = String(settings.dailyCap);
+    capInput.addEventListener("change", async () => {
+      const value = Math.max(1, Math.min(100, Number(capInput.value) || settings.dailyCap));
+      await writeInviteSettings({ dailyCap: value });
+    });
+    capRow.appendChild(capInput);
+    popover.appendChild(capRow);
+
+    const weekRow = document.createElement("label");
+    weekRow.className = "lra-rate-settings-row";
+    weekRow.textContent = "Weekly cap: ";
+    const weekInput = document.createElement("input");
+    weekInput.type = "number";
+    weekInput.min = "1";
+    weekInput.max = "500";
+    weekInput.value = String(settings.weeklyCap);
+    weekInput.addEventListener("change", async () => {
+      const value = Math.max(1, Math.min(500, Number(weekInput.value) || settings.weeklyCap));
+      await writeInviteSettings({ weeklyCap: value });
+    });
+    weekRow.appendChild(weekInput);
+    popover.appendChild(weekRow);
+
+    const actions = document.createElement("div");
+    actions.className = "lra-rate-settings-actions";
+    const mkAction = (label, fn) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "lra-rate-settings";
+      btn.textContent = label;
+      btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        fn();
+      });
+      actions.appendChild(btn);
+    };
+    mkAction("Reset today", () => resetInviteWindow("today"));
+    mkAction("Reset week", () => resetInviteWindow("week"));
+    mkAction("Clear weekly block", () => clearWeeklyBlock());
+    popover.appendChild(actions);
+
+    document.body.appendChild(popover);
+  }
+
+  async function maybeAutoOpenConnect() {
+    if (autoConnectAttempted) return;
+    autoConnectAttempted = true;
+    const slug = profileSlug();
+    if (!slug) return;
+
+    const intent = await consumePendingIntent(slug);
+    if (!intent) return;
+
+    activeRecipientName = intent.name || "";
+    activeRecipientNameSavedAt = Date.now();
+
+    // 1) Try top-level Connect.
+    let connectClicked = false;
+    const directConnect = await waitForVisibleProfileButton(/^\s*connect\s*$/i, 4000);
+    if (directConnect) {
+      clickElement(directConnect);
+      connectClicked = true;
+    } else {
+      // 2) More → menu Connect.
+      const moreButton = await waitForVisibleProfileButton(/^\s*more\s*$/i, 3000);
+      if (moreButton) {
+        clickElement(moreButton);
+        const menuConnect = await waitForMenuAction(/\bconnect\b/i, 3000);
+        if (menuConnect) {
+          clickElement(menuConnect);
+          connectClicked = true;
+        }
+      }
+    }
+    if (!connectClicked) return;
+
+    const dialog = await waitForConnectModal(6000);
+    if (!dialog) return;
+    if (checkWeeklyLimitModal(dialog)) return;
+    const modalHelper = injectConnectModalHelper(dialog);
+    await fillConnectModalNote(dialog, modalHelper);
+  }
+
+  async function waitForVisibleProfileButton(pattern, timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const button = findButtonByText(document, pattern);
+      if (button) return button;
+      await sleep(150);
+    }
+    return null;
   }
 
   function extractPersonNameFromRow(row) {
@@ -384,12 +699,35 @@
     return "";
   }
 
-  async function handleRowConnectClick(row, helper, actionButton) {
-    const originalText = helper.textContent;
-    helper.disabled = true;
-    helper.textContent = "Opening...";
+  async function handleRowConnectClick(row, button) {
+    const kind = getRowKind(row);
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = "Opening...";
 
     try {
+      // Restricted rows skip rate limit and skip note logic: just open profile in new tab.
+      if (kind === "restricted") {
+        const profileUrl = profileUrlFromRow(row);
+        if (!profileUrl) throw new Error("No profile URL.");
+        openProfileInNewTab(profileUrl);
+        button.textContent = "Opened tab";
+        return;
+      }
+
+      if (isWeeklyBlocked()) {
+        throw new Error("Weekly invitation limit hit.");
+      }
+      const settings = await inviteSettings();
+      const stats = await inviteStats();
+      if (stats.todayCount >= settings.dailyCap) {
+        throw new Error("Daily cap reached.");
+      }
+      const cooldown = remainingCooldownMs();
+      if (cooldown > 0) {
+        throw new Error(`Wait ${Math.ceil(cooldown / 1000)}s.`);
+      }
+
       const context = await activeOutreachContext();
       if (!context?.connectionMessage?.trim()) {
         throw new Error("Missing outreach note.");
@@ -397,50 +735,59 @@
 
       activeRecipientName = extractPersonNameFromRow(row);
       activeRecipientNameSavedAt = Date.now();
-      const opened = await tryOpenNativeConnect(row, actionButton);
-      if (!opened) {
-        const profileUrl = profileUrlFromRow(row);
-        if (!profileUrl) throw new Error("No profile URL.");
+      const profileUrl = profileUrlFromRow(row);
 
-        rememberConnectIntent({
+      const opened = await tryOpenNativeConnect(row);
+      if (!opened) {
+        if (!profileUrl) throw new Error("No profile URL.");
+        await persistConnectIntent({
+          slug: profileSlugFromHref(profileUrl),
           name: activeRecipientName,
           profileUrl,
           savedAt: Date.now(),
         });
-        helper.textContent = "Profile...";
-        window.location.assign(profileUrl);
+        button.textContent = "Opened tab";
+        openProfileInNewTab(profileUrl);
         return;
       }
 
       const dialog = await waitForConnectModal();
       if (!dialog) throw new Error("No connect modal.");
+      if (checkWeeklyLimitModal(dialog)) {
+        throw new Error("Weekly invitation limit hit.");
+      }
 
       const modalHelper = injectConnectModalHelper(dialog);
       const filled = await fillConnectModalNote(dialog, modalHelper);
-      helper.textContent = filled ? "Note filled" : "Modal ready";
+      button.textContent = filled ? "Note filled" : "Modal ready";
     } catch (error) {
-      helper.textContent = rowHelperErrorText(error);
-      helper.title = error?.message || String(error);
+      button.textContent = rowHelperErrorText(error);
+      button.title = error?.message || String(error);
     } finally {
       window.setTimeout(() => {
-        helper.disabled = false;
-        helper.textContent = originalText;
+        // Re-render the row button so cooldown / blocked state is reapplied.
+        injectSearchResultHelpers();
+        if (!cooldownTickTimer) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
       }, 2200);
     }
   }
 
-  async function tryOpenNativeConnect(row, preferredActionButton) {
-    if (
-      preferredActionButton &&
-      !preferredActionButton.classList.contains(ROW_HELPER_CLASS) &&
-      rowActionKind(preferredActionButton) === "connect"
-    ) {
-      clickElement(preferredActionButton);
-      return true;
-    }
+  function openProfileInNewTab(profileUrl) {
+    try {
+      const opened = window.open(profileUrl, "_blank", "noopener,noreferrer");
+      if (opened) return;
+    } catch (_) {}
+    try {
+      chrome.runtime.sendMessage({ type: "LRA_OPEN_PROFILE_TAB", url: profileUrl });
+    } catch (_) {}
+  }
 
+  async function tryOpenNativeConnect(row) {
     const directConnect = findButtonByText(row, /\bconnect\b/i);
-    if (directConnect && !directConnect.classList.contains(ROW_HELPER_CLASS)) {
+    if (directConnect && !directConnect.classList.contains(ROW_BUTTON_CLASS)) {
       clickElement(directConnect);
       return true;
     }
@@ -506,16 +853,36 @@
     return null;
   }
 
-  async function waitForConnectModal(timeoutMs = 3000) {
+  async function waitForConnectModal(timeoutMs = 6000) {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
       const dialog = findConnectDialog();
-      if (dialog) return dialog;
+      if (dialog) {
+        // If LinkedIn opened the weekly-limit modal, snapshot the block immediately.
+        checkWeeklyLimitModal(dialog);
+        return dialog;
+      }
       await sleep(120);
     }
 
     return null;
+  }
+
+  function checkWeeklyLimitModal(dialog) {
+    if (!dialog) return false;
+    const text = cleanText(dialog.innerText || dialog.textContent || "");
+    if (!text) return false;
+    if (
+      /weekly invitation limit/i.test(text) ||
+      /you'?ve? reached the (?:weekly )?limit/i.test(text) ||
+      /you have reached the (?:weekly )?limit/i.test(text) ||
+      /try again next week/i.test(text)
+    ) {
+      setWeeklyBlock();
+      return true;
+    }
+    return false;
   }
 
   function injectConnectModalHelper(dialog = findConnectDialog()) {
@@ -704,6 +1071,10 @@
     helper.textContent = "Filling...";
 
     try {
+      if (checkWeeklyLimitModal(dialog)) {
+        throw new Error("Weekly invitation limit hit.");
+      }
+
       const context = await activeOutreachContext();
       const note = personalizeConnectionNote(
         context?.connectionMessage || "",
@@ -713,19 +1084,31 @@
         .slice(0, 300);
       if (!note) throw new Error("Missing outreach note.");
 
-      let field = findNoteTextField(dialog);
+      let field = findVisibleNoteTextarea(dialog);
       if (!field) {
-        const addNoteButton = findAddNoteButton(dialog);
+        const addNoteButton =
+          findAddNoteButton(dialog) ||
+          findButtonByText(dialog, /\b(personalize|customize)\b/i);
         if (addNoteButton) clickElement(addNoteButton);
-        field = await waitForNoteTextField(dialog);
+        field = await waitForNoteTextField(dialog, 3000);
+      }
+      if (!field) {
+        // Retry once: occasionally the first "Add a note" click is swallowed
+        // during modal mount.
+        await sleep(400);
+        const retryAddNote = findAddNoteButton(dialog);
+        if (retryAddNote) clickElement(retryAddNote);
+        field = await waitForNoteTextField(dialog, 2000);
       }
 
       if (!field) throw new Error("No note field.");
 
       fillTextField(field, note);
+      try { field.focus(); } catch (_) {}
       clearConnectIntent();
-      showConnectStatus("CN: note filled. Click Send.");
+      showConnectStatus("Connect + Note: note filled. Click Send.");
       helper.textContent = "Note filled";
+      onModalNoteFilled(dialog);
       return true;
     } catch (error) {
       helper.textContent = modalHelperErrorText(error);
@@ -744,22 +1127,64 @@
   }
 
   function findNoteTextField(dialog) {
+    // Kept for backward compat. Prefer findVisibleNoteTextarea, which rejects
+    // the short filter inputs LinkedIn renders inside the dialog footer.
+    return findVisibleNoteTextarea(dialog);
+  }
+
+  function findVisibleNoteTextarea(dialog) {
+    if (!dialog) return null;
     const fields = Array.from(
-      dialog.querySelectorAll("textarea, [contenteditable='true'], input[type='text']"),
+      dialog.querySelectorAll(
+        "textarea[name='message'], textarea#custom-message, textarea, [contenteditable='true']",
+      ),
     );
-    return fields.find(isVisible) || null;
+    return (
+      fields.find((field) => {
+        if (!isVisible(field)) return false;
+        const rect = field.getBoundingClientRect();
+        // The note field is tall (>=60px). Plain <input type=text> filters are short.
+        return rect.height >= 60;
+      }) || null
+    );
   }
 
   async function waitForNoteTextField(dialog, timeoutMs = 1800) {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
-      const field = findNoteTextField(dialog);
+      const field = findVisibleNoteTextarea(dialog);
       if (field) return field;
       await sleep(100);
     }
 
     return null;
+  }
+
+  async function onModalNoteFilled(dialog) {
+    if (checkWeeklyLimitModal(dialog)) return;
+    const stats = await inviteStats();
+    const now = new Date();
+    const today = todayKey(now);
+    const week = weekStartKey(now);
+    if (stats.todayDate !== today) {
+      stats.todayDate = today;
+      stats.todayCount = 0;
+    }
+    if (stats.weekStart !== week) {
+      stats.weekStart = week;
+      stats.weekCount = 0;
+    }
+    stats.todayCount += 1;
+    stats.weekCount += 1;
+    stats.lastSentAt = Date.now();
+    lastSentAtMs = stats.lastSentAt;
+    await writeInviteStats(stats);
+    const settings = await inviteSettings();
+    currentJitterMs = Math.floor(Math.random() * settings.maxJitterMs);
+    refreshRateBanner();
+    markCooldownVisuals();
+    scheduleCooldownTick();
   }
 
   function fillTextField(field, text) {
@@ -787,6 +1212,204 @@
   async function activeOutreachContext() {
     const result = await chrome.storage.local.get(ACTIVE_OUTREACH_CONTEXT_KEY);
     return result?.[ACTIVE_OUTREACH_CONTEXT_KEY] || null;
+  }
+
+  // ----- Invite stats / settings / throttle ------------------------------------------------
+
+  function todayKey(now = new Date()) {
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function weekStartKey(now = new Date()) {
+    // Monday-anchored week start in local time. JS getDay(): 0 = Sun..6 = Sat.
+    const day = now.getDay();
+    const daysBackToMonday = (day + 6) % 7; // Mon->0, Tue->1,... Sun->6
+    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysBackToMonday);
+    return todayKey(monday);
+  }
+
+  function emptyStats() {
+    const now = new Date();
+    return {
+      todayDate: todayKey(now),
+      todayCount: 0,
+      weekStart: weekStartKey(now),
+      weekCount: 0,
+      lastSentAt: 0,
+    };
+  }
+
+  function normalizeStats(raw) {
+    const now = new Date();
+    const stats = { ...emptyStats(), ...(raw || {}) };
+    const today = todayKey(now);
+    const week = weekStartKey(now);
+    if (stats.todayDate !== today) {
+      stats.todayDate = today;
+      stats.todayCount = 0;
+    }
+    if (stats.weekStart !== week) {
+      stats.weekStart = week;
+      stats.weekCount = 0;
+    }
+    stats.todayCount = Math.max(0, Number(stats.todayCount) || 0);
+    stats.weekCount = Math.max(0, Number(stats.weekCount) || 0);
+    stats.lastSentAt = Math.max(0, Number(stats.lastSentAt) || 0);
+    return stats;
+  }
+
+  async function inviteStats() {
+    const result = await chrome.storage.local.get(INVITE_STATS_KEY);
+    const stats = normalizeStats(result?.[INVITE_STATS_KEY]);
+    cachedStats = stats;
+    lastSentAtMs = stats.lastSentAt;
+    return stats;
+  }
+
+  function inviteStatsSnapshot() {
+    return cachedStats ? { ...cachedStats } : normalizeStats(null);
+  }
+
+  async function writeInviteStats(stats) {
+    cachedStats = stats;
+    await chrome.storage.local.set({ [INVITE_STATS_KEY]: stats });
+  }
+
+  async function adjustInviteCount(delta) {
+    const stats = await inviteStats();
+    stats.todayCount = Math.max(0, stats.todayCount + delta);
+    stats.weekCount = Math.max(0, stats.weekCount + delta);
+    await writeInviteStats(stats);
+    refreshRateBanner();
+  }
+
+  async function resetInviteWindow(scope) {
+    const stats = await inviteStats();
+    if (scope === "today" || scope === "all") stats.todayCount = 0;
+    if (scope === "week" || scope === "all") stats.weekCount = 0;
+    await writeInviteStats(stats);
+    refreshRateBanner();
+  }
+
+  async function inviteSettings() {
+    const result = await chrome.storage.local.get(INVITE_SETTINGS_KEY);
+    const settings = { ...DEFAULT_SETTINGS, ...(result?.[INVITE_SETTINGS_KEY] || {}) };
+    settings.dailyCap = Math.max(1, Number(settings.dailyCap) || DEFAULT_SETTINGS.dailyCap);
+    settings.weeklyCap = Math.max(1, Number(settings.weeklyCap) || DEFAULT_SETTINGS.weeklyCap);
+    settings.minDelayMs = Math.max(0, Number(settings.minDelayMs) || DEFAULT_SETTINGS.minDelayMs);
+    settings.maxJitterMs = Math.max(0, Number(settings.maxJitterMs) || DEFAULT_SETTINGS.maxJitterMs);
+    cachedSettings = settings;
+    return settings;
+  }
+
+  function inviteSettingsSnapshot() {
+    return cachedSettings ? { ...cachedSettings } : { ...DEFAULT_SETTINGS };
+  }
+
+  async function writeInviteSettings(patch) {
+    const current = await inviteSettings();
+    const next = { ...current, ...patch };
+    cachedSettings = next;
+    await chrome.storage.local.set({ [INVITE_SETTINGS_KEY]: next });
+    refreshRateBanner();
+    return next;
+  }
+
+  async function loadWeeklyBlock() {
+    const result = await chrome.storage.local.get(WEEKLY_BLOCK_KEY);
+    cachedWeeklyBlockUntil = Number(result?.[WEEKLY_BLOCK_KEY] || 0);
+    return cachedWeeklyBlockUntil;
+  }
+
+  function isWeeklyBlocked() {
+    return cachedWeeklyBlockUntil > Date.now();
+  }
+
+  async function setWeeklyBlock(durationMs = 7 * 24 * 60 * 60 * 1000) {
+    const until = Date.now() + durationMs;
+    cachedWeeklyBlockUntil = until;
+    await chrome.storage.local.set({ [WEEKLY_BLOCK_KEY]: until });
+    refreshRateBanner();
+    injectSearchResultHelpers();
+  }
+
+  async function clearWeeklyBlock() {
+    cachedWeeklyBlockUntil = 0;
+    await chrome.storage.local.remove(WEEKLY_BLOCK_KEY);
+    refreshRateBanner();
+    injectSearchResultHelpers();
+  }
+
+  function remainingCooldownMs() {
+    const settings = inviteSettingsSnapshot();
+    const due = lastSentAtMs + settings.minDelayMs + currentJitterMs;
+    return Math.max(0, due - Date.now());
+  }
+
+  function scheduleCooldownTick() {
+    if (cooldownTickTimer) return;
+    cooldownTickTimer = window.setInterval(() => {
+      const remaining = remainingCooldownMs();
+      updateCooldownLabels(remaining);
+      if (remaining <= 0) {
+        window.clearInterval(cooldownTickTimer);
+        cooldownTickTimer = 0;
+        injectSearchResultHelpers();
+      }
+    }, 500);
+    updateCooldownLabels(remainingCooldownMs());
+  }
+
+  function updateCooldownLabels(remainingMs) {
+    const seconds = Math.ceil(remainingMs / 1000);
+    document.querySelectorAll(`.${ROW_BUTTON_CLASS}[data-cooldown="true"]`).forEach((btn) => {
+      btn.textContent = remainingMs > 0 ? `Wait ${seconds}s...` : "Connect + Note";
+      if (remainingMs <= 0) {
+        btn.disabled = false;
+        delete btn.dataset.cooldown;
+      }
+    });
+  }
+
+  function markCooldownVisuals() {
+    document.querySelectorAll(`.${ROW_BUTTON_CLASS}`).forEach((btn) => {
+      if (btn.dataset.state === "restricted") return;
+      btn.disabled = true;
+      btn.dataset.cooldown = "true";
+    });
+  }
+
+  // ----- Pending connect intents (cross-tab) -----------------------------------------------
+
+  async function persistConnectIntent(intent) {
+    const slug = String(intent?.slug || "").trim();
+    if (!slug) return;
+    const result = await chrome.storage.local.get(PENDING_INTENTS_KEY);
+    const map = result?.[PENDING_INTENTS_KEY] || {};
+    map[slug] = {
+      name: String(intent.name || "").slice(0, 120),
+      profileUrl: canonicalProfileUrlFromHref(intent.profileUrl || "") || String(intent.profileUrl || ""),
+      savedAt: Number(intent.savedAt || Date.now()),
+    };
+    await chrome.storage.local.set({ [PENDING_INTENTS_KEY]: map });
+    // Also keep the legacy sessionStorage intent — used by updateProfileConnectStatus.
+    rememberConnectIntent({ name: map[slug].name, profileUrl: map[slug].profileUrl, savedAt: map[slug].savedAt });
+  }
+
+  async function consumePendingIntent(slug) {
+    const safeSlug = String(slug || "").trim();
+    if (!safeSlug) return null;
+    const result = await chrome.storage.local.get(PENDING_INTENTS_KEY);
+    const map = result?.[PENDING_INTENTS_KEY] || {};
+    const intent = map[safeSlug];
+    if (!intent) return null;
+    delete map[safeSlug];
+    await chrome.storage.local.set({ [PENDING_INTENTS_KEY]: map });
+    if (Date.now() - Number(intent.savedAt || 0) > 10 * 60 * 1000) return null;
+    return intent;
   }
 
   function clickElement(element) {
@@ -1937,6 +2560,157 @@
         opacity: 1;
       }
 
+      .${ROW_BUTTON_WRAP_CLASS} {
+        box-sizing: border-box;
+        display: block;
+        flex-basis: 100%;
+        margin-top: 8px;
+        width: 100%;
+      }
+
+      .${ROW_BUTTON_CLASS} {
+        appearance: none;
+        background: #0a66c2;
+        border: 1px solid #0a66c2;
+        border-radius: 24px;
+        color: #fff;
+        cursor: pointer;
+        display: flex;
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        gap: 6px;
+        justify-content: center;
+        line-height: 20px;
+        min-height: 36px;
+        padding: 8px 16px;
+        white-space: nowrap;
+        width: 100%;
+      }
+
+      .${ROW_BUTTON_CLASS}:hover {
+        background: #004182;
+        border-color: #004182;
+      }
+
+      .${ROW_BUTTON_CLASS}[data-state="messageable"] {
+        background: #fff;
+        color: #0a66c2;
+      }
+
+      .${ROW_BUTTON_CLASS}[data-state="messageable"]:hover {
+        background: #eef6ff;
+      }
+
+      .${ROW_BUTTON_CLASS}[data-state="restricted"],
+      .${ROW_BUTTON_CLASS}:disabled {
+        background: #f3f4f6;
+        border-color: #cbd5e1;
+        color: #64748b;
+        cursor: not-allowed;
+      }
+
+      #${RATE_BANNER_ID}.lra-rate-banner {
+        align-items: center;
+        background: #111827;
+        border-radius: 8px;
+        bottom: 16px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+        color: #fff;
+        display: flex;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        gap: 10px;
+        left: 16px;
+        padding: 10px 14px;
+        pointer-events: auto;
+        position: fixed;
+        z-index: 2147483647;
+      }
+
+      #${RATE_BANNER_ID}.lra-rate-banner[data-blocked="true"] {
+        background: #b91c1c;
+      }
+
+      #${RATE_BANNER_ID}.lra-rate-banner .lra-rate-settings {
+        appearance: none;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.6);
+        border-radius: 999px;
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+        padding: 2px 10px;
+      }
+
+      #${RATE_BANNER_ID}.lra-rate-banner .lra-rate-settings:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
+      #${SETTINGS_POPOVER_ID}.lra-rate-settings-popover {
+        background: #111827;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 10px;
+        bottom: 72px;
+        box-shadow: 0 12px 32px rgba(0,0,0,0.32);
+        color: #fff;
+        display: flex;
+        flex-direction: column;
+        font-family: inherit;
+        font-size: 13px;
+        gap: 10px;
+        left: 16px;
+        min-width: 220px;
+        padding: 12px 14px;
+        position: fixed;
+        z-index: 2147483647;
+      }
+
+      .lra-rate-settings-heading {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .lra-rate-settings-row {
+        align-items: center;
+        display: flex;
+        font-weight: 600;
+        gap: 8px;
+        justify-content: space-between;
+      }
+
+      .lra-rate-settings-row input[type="number"] {
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 6px;
+        color: #fff;
+        font: inherit;
+        padding: 4px 6px;
+        width: 72px;
+      }
+
+      .lra-rate-settings-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .lra-rate-settings-actions .lra-rate-settings {
+        appearance: none;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.6);
+        border-radius: 999px;
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+        padding: 4px 10px;
+      }
+
+      .lra-rate-settings-actions .lra-rate-settings:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
       #${SEARCH_STATUS_ID}.lra-search-helper-status,
       #${CONNECT_STATUS_ID}.lra-connect-intent-status {
         background: #111827;
@@ -2000,5 +2774,62 @@
       }
     `;
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  // Expose a small surface for tests. Harmless in the browser; consumed by
+  // content.test.js via vm.runInNewContext.
+  try {
+    const target =
+      typeof globalThis !== "undefined" ? globalThis :
+      typeof window !== "undefined" ? window : null;
+    if (target) {
+      target.__LRA_TEST__ = {
+        EXTENSION_VERSION,
+        ROW_BUTTON_CLASS,
+        ROW_BUTTON_WRAP_CLASS,
+        DEFAULT_SETTINGS,
+        findPeopleSearchRows,
+        injectSearchResultHelpers,
+        getRowKind,
+        ensureRowConnectButton,
+        handleRowConnectClick,
+        fillConnectModalNote,
+        findVisibleNoteTextarea,
+        findAddNoteButton,
+        checkWeeklyLimitModal,
+        personalizeConnectionNote,
+        todayKey,
+        weekStartKey,
+        normalizeStats,
+        inviteStats,
+        inviteSettings,
+        adjustInviteCount,
+        resetInviteWindow,
+        onModalNoteFilled,
+        remainingCooldownMs,
+        isWeeklyBlocked,
+        setWeeklyBlock,
+        clearWeeklyBlock,
+        consumePendingIntent,
+        persistConnectIntent,
+        getState: () => ({
+          lastSentAtMs,
+          cachedStats,
+          cachedSettings,
+          cachedWeeklyBlockUntil,
+        }),
+        resetState: () => {
+          lastSentAtMs = 0;
+          currentJitterMs = 0;
+          cachedStats = null;
+          cachedSettings = null;
+          cachedWeeklyBlockUntil = 0;
+          inviteContextLoaded = false;
+          autoConnectAttempted = false;
+        },
+      };
+    }
+  } catch (_) {
+    // ignored — test surface is best-effort.
   }
 })();
