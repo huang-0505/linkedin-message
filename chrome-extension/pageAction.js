@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.2.0";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V3__";
+  const EXTENSION_VERSION = "0.2.1";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V4__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -208,24 +208,35 @@
     let helperCount = 0;
 
     for (const { row, actionButton } of searchResultActionTargets().slice(0, 40)) {
-      if (row.querySelector(`.${ROW_HELPER_CLASS}`)) {
+      const existingHelper = helperForActionButton(actionButton);
+      if (existingHelper) {
         helperCount += 1;
         continue;
       }
 
       if (!actionButton?.parentElement) continue;
 
+      const canConnect = canOpenConnectFromRow(row, actionButton);
       const helper = document.createElement("button");
       helper.type = "button";
       helper.className = ROW_HELPER_CLASS;
-      helper.textContent = "Connect + note";
-      helper.title =
-        "Open LinkedIn's connect modal for this row, then use your referral note.";
-      helper.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        handleRowConnectClick(row, helper);
-      });
+      helper.dataset.lraActionFor = rowActionKind(actionButton) || "unknown";
+
+      if (canConnect) {
+        helper.textContent = "Connect + note";
+        helper.title =
+          "Open LinkedIn's connect modal for this row, then use your referral note.";
+        helper.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          handleRowConnectClick(row, helper, actionButton);
+        });
+      } else {
+        helper.textContent = "No connect";
+        helper.disabled = true;
+        helper.title =
+          "LinkedIn is not showing a Connect action on this search row. Open the profile if you want to connect manually.";
+      }
 
       actionButton.parentElement.insertBefore(helper, actionButton);
       helperCount += 1;
@@ -236,7 +247,7 @@
 
   function searchResultActionTargets() {
     const targets = [];
-    const seenRows = new Set();
+    const seenButtons = new Set();
     const main = document.querySelector("main") || document.body;
     const actionButtons = Array.from(
       main.querySelectorAll("button, a[role='button']"),
@@ -247,10 +258,11 @@
     });
 
     for (const actionButton of actionButtons) {
+      if (seenButtons.has(actionButton)) continue;
       const row = closestSearchResultRow(actionButton);
-      if (!row || seenRows.has(row) || !isVisible(row)) continue;
+      if (!row || !isVisible(row)) continue;
 
-      seenRows.add(row);
+      seenButtons.add(actionButton);
       targets.push({ row, actionButton });
     }
 
@@ -265,30 +277,74 @@
       "li",
     ].join(", ");
     const direct = seed.closest(selector);
-    if (direct && isLikelyPeopleSearchRow(direct)) return direct;
+    if (direct && isLikelyPeopleSearchRow(direct, seed)) return direct;
 
+    let best = null;
     let node = seed.parentElement;
-    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
-      if (isLikelyPeopleSearchRow(node)) return node;
+    for (let depth = 0; node && depth < 12; depth += 1, node = node.parentElement) {
+      if (isLikelyPeopleSearchRow(node, seed)) {
+        best = node;
+        break;
+      }
+
+      if (!best && isVisible(node) && node.querySelector?.('a[href*="/in/"]')) {
+        const rect = node.getBoundingClientRect();
+        if (rect.height > 0 && rect.height <= 480 && countVisibleRowActions(node) <= 3) {
+          best = node;
+        }
+      }
     }
 
-    return direct || seed.parentElement;
+    return best || direct || seed.parentElement;
   }
 
-  function isLikelyPeopleSearchRow(row) {
+  function isLikelyPeopleSearchRow(row, seed) {
     if (!row || !isVisible(row)) return false;
+    if (seed && !row.contains(seed)) return false;
+
+    const rect = row.getBoundingClientRect();
+    if (rect.height > 420 || rect.width < 240) return false;
+
+    const actionCount = countVisibleRowActions(row);
+    if (actionCount > 3) return false;
+
     if (row.querySelector(`.${ROW_HELPER_CLASS}`)) return true;
-    if (row.querySelector('a[href*="/in/"]')) return true;
+    if (row.querySelector('a[href*="/in/"]') && actionCount >= 1) return true;
 
     const text = cleanText(row.innerText || row.textContent || "");
     return /\b(1st|2nd|3rd\+?|3rd)\b/i.test(text) && /\b(message|connect|follow)\b/i.test(text);
   }
 
-  function findRowActionButton(row) {
-    return (
-      findButtonByText(row, /^(message|connect|follow)$/i) ||
-      findButtonByText(row, /\b(message|connect|follow)\b/i)
-    );
+  function countVisibleRowActions(row) {
+    return Array.from(row.querySelectorAll("button, a[role='button']")).filter(
+      (button) =>
+        isVisible(button) &&
+        !button.classList.contains(ROW_HELPER_CLASS) &&
+        /\b(message|connect|follow|more)\b/i.test(buttonLabel(button)),
+    ).length;
+  }
+
+  function helperForActionButton(actionButton) {
+    let node = actionButton.previousElementSibling;
+    while (node) {
+      if (node.classList?.contains(ROW_HELPER_CLASS)) return node;
+      if (isVisible(node)) return null;
+      node = node.previousElementSibling;
+    }
+    return null;
+  }
+
+  function rowActionKind(actionButton) {
+    const label = buttonLabel(actionButton);
+    if (/\bconnect\b/i.test(label)) return "connect";
+    if (/\bmessage\b/i.test(label)) return "message";
+    if (/\bfollow\b/i.test(label)) return "follow";
+    return "";
+  }
+
+  function canOpenConnectFromRow(row, actionButton) {
+    if (rowActionKind(actionButton) === "connect") return true;
+    return Boolean(findMoreButton(row));
   }
 
   function updateSearchStatus(helperCount) {
@@ -322,7 +378,7 @@
     return "";
   }
 
-  async function handleRowConnectClick(row, helper) {
+  async function handleRowConnectClick(row, helper, actionButton) {
     const originalText = helper.textContent;
     helper.disabled = true;
     helper.textContent = "Opening...";
@@ -335,7 +391,7 @@
 
       activeRecipientName = extractPersonNameFromRow(row);
       activeRecipientNameSavedAt = Date.now();
-      const opened = await tryOpenNativeConnect(row);
+      const opened = await tryOpenNativeConnect(row, actionButton);
       if (!opened) throw new Error("No connect action.");
 
       const dialog = await waitForConnectModal();
@@ -355,7 +411,16 @@
     }
   }
 
-  async function tryOpenNativeConnect(row) {
+  async function tryOpenNativeConnect(row, preferredActionButton) {
+    if (
+      preferredActionButton &&
+      !preferredActionButton.classList.contains(ROW_HELPER_CLASS) &&
+      rowActionKind(preferredActionButton) === "connect"
+    ) {
+      clickElement(preferredActionButton);
+      return true;
+    }
+
     const directConnect = findButtonByText(row, /\bconnect\b/i);
     if (directConnect && !directConnect.classList.contains(ROW_HELPER_CLASS)) {
       clickElement(directConnect);
@@ -1742,8 +1807,11 @@
       }
 
       .${ROW_HELPER_CLASS}:disabled {
+        background: #f3f4f6;
+        border-color: #cbd5e1;
+        color: #64748b;
         cursor: default;
-        opacity: 0.75;
+        opacity: 1;
       }
 
       #${SEARCH_STATUS_ID}.lra-search-helper-status {
