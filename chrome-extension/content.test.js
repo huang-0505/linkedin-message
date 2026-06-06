@@ -212,14 +212,14 @@ function makeRect(width = 600, height = 100) {
   return { width, height, top: 0, left: 0, bottom: height, right: width };
 }
 
-function mkButton({ label = "", visible = true } = {}) {
+function mkButton({ label = "", ariaLabel = label, visible = true } = {}) {
   const button = {
     tagName: "BUTTON",
     nodeType: 1,
     classList: makeClassList(),
     dataset: {},
     style: {},
-    attributes: { "aria-label": label, title: "" },
+    attributes: { "aria-label": ariaLabel, title: "" },
     innerText: label,
     textContent: label,
     parentElement: null,
@@ -634,6 +634,51 @@ function loadPageAction({ doc, storage = {} }) {
   const { exports } = loadPageAction({ doc });
   assert.equal(exports.getRowKind(connectableRow), "connectable");
   assert.equal(exports.getRowKind(messageableRow), "messageable");
+}
+
+// -- Test 6: profile Connect finder handles LinkedIn invite aria-label --------
+{
+  const { doc } = makePeopleSearchDocument({ rows: [] });
+  const inviteButton = mkButton({
+    label: "",
+    ariaLabel: "Invite Jane Doe to connect",
+  });
+  const messageButton = mkButton({ label: "Message" });
+  const connectionsButton = mkButton({
+    label: "500+ connections",
+    ariaLabel: "500+ connections",
+  });
+  const topCard = {
+    querySelectorAll(selector) {
+      return selector === "button, a[role='button']"
+        ? [messageButton, connectionsButton, inviteButton]
+        : [];
+    },
+  };
+  const originalQuerySelector = doc.querySelector.bind(doc);
+  doc.querySelector = (selector) =>
+    selector === ".pv-top-card" ? topCard : originalQuerySelector(selector);
+
+  const { exports } = loadPageAction({ doc });
+  assert.equal(
+    exports.findProfileConnectButton(),
+    inviteButton,
+    "profile Connect finder should match aria-label invite pattern",
+  );
+}
+
+// -- Test 7: Add-note finder accepts LinkedIn text variants -------------------
+{
+  const { doc } = makePeopleSearchDocument({ rows: [] });
+  const addNote = mkButton({ label: "Add note" });
+  const cancel = mkButton({ label: "Cancel" });
+  const dialog = {
+    querySelectorAll(selector) {
+      return selector === "button, a[role='button']" ? [cancel, addNote] : [];
+    },
+  };
+  const { exports } = loadPageAction({ doc });
+  assert.equal(exports.findAddNoteButton(dialog), addNote);
 }
 
 // -- Test 6: normalizeStats date rollover ------------------------------------

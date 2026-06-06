@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.4.4";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V10__";
+  const EXTENSION_VERSION = "0.4.5";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V11__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -897,20 +897,32 @@
     if (!slug) return;
 
     const intent = await consumePendingIntent(slug);
-    if (!intent) return;
+    if (!intent) {
+      // No pending intent — this profile tab wasn't opened by our extension.
+      // Don't show an error banner; just return quietly.
+      return;
+    }
+
+    // Diagnostic: also log to console so user can verify in DevTools.
+    try { console.info("[Connect+Note] auto-open running for", slug, intent); } catch (_) {}
 
     activeRecipientName = intent.name || "";
     activeRecipientNameSavedAt = Date.now();
+    setAutoConnectStatus("Connect + Note: finding Connect button...");
 
-    // 1) Try top-level Connect.
+    // 1) Try top-level Connect. Profile pages use aria-label patterns like
+    //    "Invite Soe Than to connect" — combined label is not "Connect" alone,
+    //    so we use a flexible matcher.
     let connectClicked = false;
-    const directConnect = await waitForVisibleProfileButton(/^\s*connect\s*$/i, 4000);
+    const directConnect = await waitForProfileConnectButton(6000);
     if (directConnect) {
       clickElement(directConnect);
       connectClicked = true;
+      setAutoConnectStatus("Connect + Note: opening invite modal...");
     } else {
       // 2) More → menu Connect.
-      const moreButton = await waitForVisibleProfileButton(/^\s*more\s*$/i, 3000);
+      setAutoConnectStatus("Connect + Note: opening More menu...");
+      const moreButton = await waitForProfileMoreButton(4000);
       if (moreButton) {
         clickElement(moreButton);
         const menuConnect = await waitForMenuAction(/\bconnect\b/i, 3000);
@@ -920,15 +932,130 @@
         }
       }
     }
-    if (!connectClicked) return;
+    if (!connectClicked) {
+      setAutoConnectStatus("Connect + Note: Connect button not found. Click it manually.", true);
+      return;
+    }
 
-    const dialog = await waitForConnectModal(6000);
-    if (!dialog) return;
-    if (checkWeeklyLimitModal(dialog)) return;
+    const dialog = await waitForConnectModal(8000);
+    if (!dialog) {
+      setAutoConnectStatus("Connect + Note: invite modal didn't open.", true);
+      return;
+    }
+    if (checkWeeklyLimitModal(dialog)) {
+      setAutoConnectStatus("Connect + Note: LinkedIn weekly invitation limit hit.", true);
+      return;
+    }
     const modalHelper = injectConnectModalHelper(dialog);
-    await fillConnectModalNote(dialog, modalHelper);
+    const filled = await fillConnectModalNote(dialog, modalHelper);
+    if (filled) {
+      setAutoConnectStatus("Connect + Note: note filled. Click Send.");
+    } else {
+      setAutoConnectStatus("Connect + Note: couldn't fill note. Paste it manually.", true);
+    }
   }
 
+  function setAutoConnectStatus(text, isError = false) {
+    let status = document.getElementById("lra-auto-connect-status");
+    if (!status) {
+      status = document.createElement("div");
+      status.id = "lra-auto-connect-status";
+      status.style.cssText =
+        "position:fixed;top:72px;right:16px;z-index:2147483647;background:#0a66c2;color:#fff;font:600 13px -apple-system,system-ui,sans-serif;padding:10px 14px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.22);max-width:320px;";
+      document.body.appendChild(status);
+    }
+    status.textContent = text;
+    status.style.background = isError ? "#b91c1c" : "#0a66c2";
+    window.clearTimeout(status.dataset.hideTimer || 0);
+    const timer = window.setTimeout(() => status.remove(), 8000);
+    status.dataset.hideTimer = String(timer);
+  }
+
+  // Profile-page Connect button finder.
+  // LinkedIn's profile Connect button can appear with text "Connect" but with
+  // aria-label like "Invite Soe Than to connect" — so a strict match fails.
+  // We accept any visible button whose label contains the literal word
+  // "Connect" (case-insensitive), and we prefer buttons in the top-card area.
+  async function waitForProfileConnectButton(timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const button = findProfileConnectButton();
+      if (button) return button;
+      await sleep(150);
+    }
+    return null;
+  }
+
+  function findProfileConnectButton() {
+    const candidates = profileActionCandidates()
+      .filter((el) => isVisible(el) && !el.classList.contains(ROW_BUTTON_CLASS) && !el.classList.contains(ROW_HELPER_CLASS));
+
+    // Pass 1: a button whose visible text is exactly "Connect" (ignoring icons).
+    const exact = candidates.find((el) => {
+      const text = cleanText(el.innerText || el.textContent || "");
+      return /^connect$/i.test(text);
+    });
+    if (exact) return exact;
+
+    // Pass 2: a button whose aria-label starts with "Invite " and contains
+    // " to connect" — LinkedIn's standard pattern.
+    const aria = candidates.find((el) => {
+      const label = el.getAttribute("aria-label") || "";
+      return /^invite\b.*\bto connect\b/i.test(label);
+    });
+    if (aria) return aria;
+
+    // Pass 3: any button with "connect" anywhere in its combined label, that
+    // is NOT "follow", "message", "more", "connection(s)", or "connected".
+    const loose = candidates.find((el) => {
+      const label = buttonLabel(el).toLowerCase();
+      if (!/\bconnect\b/.test(label)) return false;
+      if (/\b(connected|connections?|follow|message|more|see all|remove connection)\b/.test(label)) return false;
+      return true;
+    });
+    return loose || null;
+  }
+
+  async function waitForProfileMoreButton(timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const candidates = profileActionCandidates()
+        .filter((el) => isVisible(el) && !el.classList.contains(ROW_BUTTON_CLASS));
+      const match = candidates.find((el) => {
+        const text = cleanText(el.innerText || el.textContent || "");
+        const aria = el.getAttribute("aria-label") || "";
+        return /^more$/i.test(text) || /^more actions?$/i.test(aria) || /\bmore options?\b/i.test(aria);
+      });
+      if (match) return match;
+      await sleep(150);
+    }
+    return null;
+  }
+
+  function profileActionCandidates() {
+    const roots = [
+      document.querySelector(".pv-top-card"),
+      document.querySelector(".pv-top-card-v2-ctas"),
+      document.querySelector(".pv-text-details__left-panel"),
+      document.querySelector("main section:first-of-type"),
+      document.querySelector("main"),
+      document.body,
+    ].filter(Boolean);
+
+    const seen = new Set();
+    const candidates = [];
+    for (const root of roots) {
+      if (!root?.querySelectorAll) continue;
+      for (const el of root.querySelectorAll("button, a[role='button']")) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        candidates.push(el);
+      }
+    }
+    return candidates;
+  }
+
+  // Kept for backward compat with any other callers.
   async function waitForVisibleProfileButton(pattern, timeoutMs) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
@@ -1401,7 +1528,7 @@
   }
 
   function findAddNoteButton(dialog) {
-    return findButtonByText(dialog, /\badd a note\b/i);
+    return findButtonByText(dialog, /\b(add\s+(?:a\s+)?note|personalize|customize)\b/i);
   }
 
   function findNoteTextField(dialog) {
@@ -1469,7 +1596,11 @@
     if (field.isContentEditable || field.matches("[contenteditable='true']")) {
       field.focus();
       field.textContent = text;
+      try {
+        field.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
+      } catch (_) {}
       field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
       return;
     }
 
@@ -1478,13 +1609,31 @@
     const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
 
     field.focus();
+    // Use the native setter to bypass React's controlled-input check so the
+    // value sticks. Then fire input/change so React's onChange handler reads
+    // the new value and updates its internal state.
     if (setter) {
       setter.call(field, text);
     } else {
       field.value = text;
     }
-    field.dispatchEvent(new Event("input", { bubbles: true }));
+    try {
+      field.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
+    } catch (_) {}
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
     field.dispatchEvent(new Event("change", { bubbles: true }));
+    // Some React-controlled fields snap back if the cursor isn't placed.
+    try {
+      if (typeof field.setSelectionRange === "function") {
+        field.setSelectionRange(text.length, text.length);
+      }
+    } catch (_) {}
+    // Verify and retry once if React clobbered the value.
+    if (field.value !== text) {
+      if (setter) setter.call(field, text);
+      else field.value = text;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    }
   }
 
   async function activeOutreachContext() {
@@ -3090,6 +3239,8 @@
         ensureRowConnectButton,
         handleRowConnectClick,
         fillConnectModalNote,
+        findProfileConnectButton,
+        profileActionCandidates,
         findVisibleNoteTextarea,
         findAddNoteButton,
         checkWeeklyLimitModal,
