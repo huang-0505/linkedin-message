@@ -6,7 +6,7 @@
 // or click final Send.
 
 (() => {
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH__";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V2__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -224,10 +224,15 @@
   function searchResultRows() {
     const rows = [];
     const seen = new Set();
-    const links = Array.from(document.querySelectorAll('a[href*="/in/"]'));
+    const seeds = [
+      ...document.querySelectorAll('a[href*="/in/"]'),
+      ...Array.from(document.querySelectorAll("button, a[role='button']")).filter(
+        (button) => /\b(message|connect|follow)\b/i.test(buttonLabel(button)),
+      ),
+    ];
 
-    for (const link of links) {
-      const row = link.closest(
+    for (const seed of seeds) {
+      const row = seed.closest(
         [
           "[data-view-name='search-entity-result-universal-template']",
           ".reusable-search__result-container",
