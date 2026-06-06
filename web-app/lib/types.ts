@@ -4,6 +4,8 @@
 export type JobData = {
   jobTitle: string;
   company: string;
+  companyLinkedInId?: string;
+  companyLinkedInUrl?: string;
   location?: string;
   jobUrl?: string;
   jobDescription?: string;
@@ -22,6 +24,9 @@ export type TargetPerson = {
   category: string;
   whyRelevant: string;
   searchQuery: string;
+  searchLocation?: string;
+  currentCompanyId?: string;
+  currentCompanyName?: string;
   linkedinSearchUrl: string;
   connectionMessage: string;
   followUpMessage: string;

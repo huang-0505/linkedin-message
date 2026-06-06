@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { buildLinkedInPeopleSearchUrl } from "@/lib/linkedin";
+import {
+  buildLinkedInPeopleSearchUrl,
+  normalizeLinkedInPeopleSearchQuery,
+  removeLinkedInLocationFromQuery,
+} from "@/lib/linkedin";
 import { rememberOutreachContext } from "@/lib/storage";
 import type { TargetPerson } from "@/lib/types";
 
@@ -15,8 +19,11 @@ export default function TargetPersonCard({ person }: { person: TargetPerson }) {
   }, [person]);
 
   const linkedinSearchUrl = useMemo(
-    () => buildLinkedInPeopleSearchUrl(draft.searchQuery),
-    [draft.searchQuery],
+    () =>
+      buildLinkedInPeopleSearchUrl(draft.searchQuery, {
+        currentCompanyId: person.currentCompanyId,
+      }),
+    [draft.searchQuery, person.currentCompanyId],
   );
 
   async function copy(label: string, text: string) {
@@ -34,13 +41,18 @@ export default function TargetPersonCard({ person }: { person: TargetPerson }) {
   }
 
   async function openSearchWithNote() {
-    rememberOutreachContext({
+    const context = {
       category: person.category,
-      searchQuery: draft.searchQuery,
+      searchQuery: normalizeLinkedInPeopleSearchQuery(draft.searchQuery),
       connectionMessage: draft.connectionMessage,
-    });
+    };
+
+    rememberOutreachContext(context);
+    broadcastOutreachContext(context);
+
+    const copyPromise = copy("connection", draft.connectionMessage);
     window.open(linkedinSearchUrl, "_blank", "noopener,noreferrer");
-    await copy("connection", draft.connectionMessage);
+    await copyPromise;
   }
 
   return (
@@ -64,13 +76,18 @@ export default function TargetPersonCard({ person }: { person: TargetPerson }) {
           <span className="block font-medium text-gray-700 mb-1">
             LinkedIn search query
           </span>
+          {person.currentCompanyName && (
+            <span className="mb-2 inline-flex rounded-full bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700">
+              Current company: {person.currentCompanyName}
+            </span>
+          )}
           <input
             className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-gray-800"
             value={draft.searchQuery}
             onChange={(event) =>
               setDraft((current) => ({
                 ...current,
-                searchQuery: event.target.value,
+                searchQuery: normalizeLinkedInPeopleSearchQuery(event.target.value),
               }))
             }
           />
@@ -93,9 +110,26 @@ export default function TargetPersonCard({ person }: { person: TargetPerson }) {
 
 function editablePerson(person: TargetPerson) {
   return {
-    searchQuery: person.searchQuery,
+    searchQuery: removeLinkedInLocationFromQuery(
+      person.searchQuery,
+      person.searchLocation,
+    ),
     connectionMessage: person.connectionMessage,
   };
+}
+
+function broadcastOutreachContext(context: {
+  category: string;
+  searchQuery: string;
+  connectionMessage: string;
+}) {
+  window.postMessage(
+    {
+      type: "LRA_REMEMBER_OUTREACH_CONTEXT",
+      context,
+    },
+    window.location.origin,
+  );
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {

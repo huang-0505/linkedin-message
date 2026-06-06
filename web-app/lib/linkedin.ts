@@ -2,28 +2,82 @@
 // We do NOT scrape LinkedIn — these URLs are opened in a new tab so the user
 // can search and reach out manually.
 
-export function buildLinkedInPeopleSearchUrl(query: string): string {
-  const encoded = encodeURIComponent(query.trim());
-  return `https://www.linkedin.com/search/results/people/?keywords=${encoded}`;
+export function buildLinkedInPeopleSearchUrl(
+  query: string,
+  opts: { currentCompanyId?: string } = {},
+): string {
+  const params = new URLSearchParams();
+  params.set("keywords", normalizeLinkedInPeopleSearchQuery(query));
+
+  const companyId = normalizeLinkedInCompanyId(opts.currentCompanyId || "");
+  if (companyId) {
+    params.set("origin", "FACETED_SEARCH");
+    params.set("currentCompany", JSON.stringify([companyId]));
+  }
+
+  return `https://www.linkedin.com/search/results/people/?${params.toString()}`;
+}
+
+export function normalizeLinkedInPeopleSearchQuery(query: string): string {
+  return query
+    .replace(/[\u201c\u201d"]/g, " ")
+    .replace(/[\u2018\u2019']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function removeLinkedInLocationFromQuery(
+  query: string,
+  location: string | undefined,
+): string {
+  let cleaned = normalizeLinkedInPeopleSearchQuery(query);
+  const candidates = locationSearchTerms(location);
+
+  for (const term of candidates) {
+    cleaned = cleaned.replace(new RegExp(`\\b${escapeRegExp(term)}\\b`, "gi"), " ");
+  }
+
+  return normalizeLinkedInPeopleSearchQuery(cleaned);
 }
 
 // Produce useful rule-based search queries for a given job.
 export function defaultSearchQueries(opts: {
   company: string;
   jobTitle: string;
-  city?: string;
   school?: string;
+  useCompanyKeyword?: boolean;
 }): string[] {
-  const { company, jobTitle, city } = opts;
+  const { company, jobTitle, useCompanyKeyword = true } = opts;
+  const companyPrefix = useCompanyKeyword ? company : "";
   return [
-    withCity(`${company} "${jobTitle}"`, city),
-    withCity(`${company} ${managerRoleFor(jobTitle)}`, city),
-    withCity(`${company} recruiter talent acquisition ${functionalArea(jobTitle)}`.trim(), city),
+    normalizeLinkedInPeopleSearchQuery(`${companyPrefix} ${jobTitle}`),
+    normalizeLinkedInPeopleSearchQuery(`${companyPrefix} ${managerRoleFor(jobTitle)}`),
+    normalizeLinkedInPeopleSearchQuery(
+      `${companyPrefix} recruiter talent acquisition ${functionalArea(jobTitle)}`,
+    ),
   ];
 }
 
-function withCity(query: string, city = ""): string {
-  return [query.trim(), city.trim()].filter(Boolean).join(" ");
+export function normalizeLinkedInCompanyId(value: string): string {
+  return (value || "").match(/\d+/)?.[0] || "";
+}
+
+function locationSearchTerms(location: string | undefined): string[] {
+  const normalized = normalizeLinkedInPeopleSearchQuery(location || "");
+  if (!normalized) return [];
+
+  const parts = normalized
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 3);
+
+  return Array.from(new Set([normalized, parts[0]].filter(Boolean))).sort(
+    (a, b) => b.length - a.length,
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function managerRoleFor(title: string): string {

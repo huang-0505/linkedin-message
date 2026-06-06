@@ -220,7 +220,10 @@ function ReferralPageInner() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {plan.targetPeople.map((p, i) => (
-              <TargetPersonCard key={`${p.category}-${i}`} person={p} />
+              <TargetPersonCard
+                key={`${p.category}-${i}`}
+                person={{ ...p, searchLocation: p.searchLocation || job.location }}
+              />
             ))}
           </div>
         </div>
@@ -243,6 +246,8 @@ function readJobFromParams(
       inferJobTitleFromDescription(jobDescription) ||
       inferJobTitleFromUrl(params.get("jobUrl") || ""),
     company,
+    companyLinkedInId: params.get("companyLinkedInId") || "",
+    companyLinkedInUrl: params.get("companyLinkedInUrl") || "",
     location: params.get("location") || "",
     jobUrl: params.get("jobUrl") || "",
     jobDescription,
@@ -277,6 +282,8 @@ function normalizeIncomingJob(job: JobData): JobData {
 
   return {
     ...job,
+    companyLinkedInId: job.companyLinkedInId || "",
+    companyLinkedInUrl: job.companyLinkedInUrl || "",
     jobTitle:
       job.jobTitle ||
       inferJobTitleFromDescription(job.jobDescription || "") ||

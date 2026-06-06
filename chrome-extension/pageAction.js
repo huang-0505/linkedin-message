@@ -1,16 +1,22 @@
 // pageAction.js — injects first-class buttons into LinkedIn job/profile pages.
 //
 // This keeps the user in LinkedIn: job pages get "Find referral"; profile
-// pages get "Add to referral panel". People search pages are intentionally not
-// matched here so the extension only captures a page the user chose.
+// pages get "Add to referral panel". People search pages get row-level connect
+// helpers and modal note filling. The extension still does not scrape results
+// or click final Send.
 
 (() => {
   const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
+  const ROW_HELPER_CLASS = "lra-row-connect-helper";
+  const MODAL_HELPER_ID = "lra-modal-note-helper";
+  const ACTIVE_OUTREACH_CONTEXT_KEY = "lra:active-outreach-context";
   let lastUrl = "";
   let injectTimer = 0;
+  let activeRecipientName = "";
+  let activeRecipientNameSavedAt = 0;
 
   if (typeof window[REFRESH_KEY] === "function") {
     window[REFRESH_KEY]();
@@ -57,6 +63,14 @@
       return;
     }
 
+    injectConnectModalHelper();
+
+    if (mode === "search") {
+      removeButton();
+      injectSearchResultHelpers();
+      return;
+    }
+
     const existing = document.getElementById(BUTTON_ID);
     if (existing && existing.dataset.mode === mode && !force) return;
 
@@ -71,7 +85,7 @@
     button.type = "button";
     button.dataset.mode = mode;
     button.className = "lra-page-action-button";
-    button.textContent = mode === "profile" ? "Add to referral panel" : "Find referral";
+    button.textContent = labelForMode(mode);
     button.addEventListener("click", () => handleClick(button, mode));
 
     wrap.appendChild(button);
@@ -90,6 +104,9 @@
       if (!(host === "linkedin.com" || host.endsWith(".linkedin.com"))) return "";
       if (parts[0] === "jobs") return "job";
       if (parts[0] === "in" && parts[1]) return "profile";
+      if (parts[0] === "search" && parts[1] === "results" && parts[2] === "people") {
+        return "search";
+      }
       return "";
     } catch (_) {
       return "";
@@ -98,9 +115,16 @@
 
   async function handleClick(button, mode) {
     const originalText = button.textContent;
-    setButtonState(button, mode === "profile" ? "Adding..." : "Opening...");
+    setButtonState(button, pendingLabelForMode(mode));
 
     try {
+      if (mode === "search") {
+        await copyActiveOutreachNote();
+        setButtonState(button, "Note copied ✓");
+        window.setTimeout(() => setButtonState(button, originalText), 1800);
+        return;
+      }
+
       const message =
         mode === "profile"
           ? { type: "LRA_ADD_PROFILE", contact: extractProfile() }
@@ -121,15 +145,446 @@
     }
   }
 
+  function labelForMode(mode) {
+    if (mode === "profile") return "Add to referral panel";
+    if (mode === "search") return "Copy outreach note";
+    return "Find referral";
+  }
+
+  function pendingLabelForMode(mode) {
+    if (mode === "profile") return "Adding...";
+    if (mode === "search") return "Copying...";
+    return "Opening...";
+  }
+
   function setButtonState(button, text) {
     button.textContent = text;
   }
 
   function shortErrorText(error) {
     const text = error?.message || String(error);
+    if (/missing outreach note/i.test(text)) return "Open from app first";
     if (/couldn'?t read|couldn'?t find/i.test(text)) return "Select job first";
     if (/extension context/i.test(text)) return "Reload extension";
     return "Try again";
+  }
+
+  async function copyActiveOutreachNote() {
+    const result = await chrome.storage.local.get("lra:active-outreach-context");
+    const note = result?.["lra:active-outreach-context"]?.connectionMessage || "";
+    if (!note.trim()) throw new Error("Missing outreach note.");
+    await copyTextToClipboard(note);
+  }
+
+  async function copyTextToClipboard(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch (_) {
+      // Fall back below.
+    }
+
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.setAttribute("readonly", "");
+    textArea.style.position = "fixed";
+    textArea.style.top = "-9999px";
+    document.body.appendChild(textArea);
+    textArea.select();
+    const didCopy = document.execCommand("copy");
+    document.body.removeChild(textArea);
+    if (!didCopy) throw new Error("Copy failed.");
+  }
+
+  function injectSearchResultHelpers() {
+    for (const row of searchResultRows().slice(0, 40)) {
+      if (row.querySelector(`.${ROW_HELPER_CLASS}`)) continue;
+
+      const actionButton = findRowActionButton(row);
+      if (!actionButton?.parentElement) continue;
+
+      const helper = document.createElement("button");
+      helper.type = "button";
+      helper.className = ROW_HELPER_CLASS;
+      helper.textContent = "Connect + note";
+      helper.title =
+        "Open LinkedIn's connect modal for this row, then use your referral note.";
+      helper.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handleRowConnectClick(row, helper);
+      });
+
+      actionButton.parentElement.insertBefore(helper, actionButton);
+    }
+  }
+
+  function searchResultRows() {
+    const rows = [];
+    const seen = new Set();
+    const links = Array.from(document.querySelectorAll('a[href*="/in/"]'));
+
+    for (const link of links) {
+      const row = link.closest(
+        [
+          "[data-view-name='search-entity-result-universal-template']",
+          ".reusable-search__result-container",
+          ".entity-result",
+          "li",
+        ].join(", "),
+      );
+
+      if (!row || seen.has(row) || !isVisible(row)) continue;
+      if (!findRowActionButton(row)) continue;
+
+      seen.add(row);
+      rows.push(row);
+    }
+
+    return rows;
+  }
+
+  function findRowActionButton(row) {
+    return (
+      findButtonByText(row, /^(message|connect|follow)$/i) ||
+      findButtonByText(row, /\b(message|connect|follow)\b/i)
+    );
+  }
+
+  function extractPersonNameFromRow(row) {
+    const profileLinks = Array.from(row.querySelectorAll('a[href*="/in/"]'));
+
+    for (const link of profileLinks) {
+      if (!isVisible(link)) continue;
+      const name = cleanPersonName(link.innerText || link.textContent || "");
+      if (name) return name;
+    }
+
+    return "";
+  }
+
+  async function handleRowConnectClick(row, helper) {
+    const originalText = helper.textContent;
+    helper.disabled = true;
+    helper.textContent = "Opening...";
+
+    try {
+      const context = await activeOutreachContext();
+      if (!context?.connectionMessage?.trim()) {
+        throw new Error("Missing outreach note.");
+      }
+
+      activeRecipientName = extractPersonNameFromRow(row);
+      activeRecipientNameSavedAt = Date.now();
+      const opened = await tryOpenNativeConnect(row);
+      if (!opened) throw new Error("No connect action.");
+
+      const dialog = await waitForConnectModal();
+      if (!dialog) throw new Error("No connect modal.");
+
+      const modalHelper = injectConnectModalHelper(dialog);
+      const filled = await fillConnectModalNote(dialog, modalHelper);
+      helper.textContent = filled ? "Note filled" : "Modal ready";
+    } catch (error) {
+      helper.textContent = rowHelperErrorText(error);
+      helper.title = error?.message || String(error);
+    } finally {
+      window.setTimeout(() => {
+        helper.disabled = false;
+        helper.textContent = originalText;
+      }, 2200);
+    }
+  }
+
+  async function tryOpenNativeConnect(row) {
+    const directConnect = findButtonByText(row, /\bconnect\b/i);
+    if (directConnect && !directConnect.classList.contains(ROW_HELPER_CLASS)) {
+      clickElement(directConnect);
+      return true;
+    }
+
+    const moreButton = findMoreButton(row);
+    if (!moreButton) return false;
+
+    clickElement(moreButton);
+
+    const menuConnect = await waitForMenuAction(/\bconnect\b/i);
+    if (!menuConnect) return false;
+
+    clickElement(menuConnect);
+    return true;
+  }
+
+  function findMoreButton(row) {
+    return (
+      findButtonByText(row, /^more$/i) ||
+      Array.from(row.querySelectorAll("button, a[role='button']")).find((button) => {
+        const label = button.getAttribute("aria-label") || "";
+        return isVisible(button) && /\bmore\b/i.test(label);
+      })
+    );
+  }
+
+  function findButtonByText(root, pattern) {
+    const buttons = Array.from(root.querySelectorAll("button, a[role='button']"));
+    return buttons.find((button) => {
+      if (!isVisible(button)) return false;
+      if (button.classList.contains(ROW_HELPER_CLASS)) return false;
+      return pattern.test(buttonLabel(button));
+    });
+  }
+
+  function buttonLabel(button) {
+    return cleanText(
+      [
+        button.innerText || button.textContent || "",
+        button.getAttribute("aria-label") || "",
+        button.getAttribute("title") || "",
+      ].join(" "),
+    );
+  }
+
+  async function waitForMenuAction(pattern, timeoutMs = 1600) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const actions = Array.from(
+        document.querySelectorAll("[role='menuitem'], button, a[role='button']"),
+      );
+      const match = actions.find(
+        (action) =>
+          isVisible(action) &&
+          !action.classList.contains(ROW_HELPER_CLASS) &&
+          pattern.test(buttonLabel(action)),
+      );
+      if (match) return match;
+      await sleep(100);
+    }
+
+    return null;
+  }
+
+  async function waitForConnectModal(timeoutMs = 3000) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const dialog = findConnectDialog();
+      if (dialog) return dialog;
+      await sleep(120);
+    }
+
+    return null;
+  }
+
+  function injectConnectModalHelper(dialog = findConnectDialog()) {
+    if (!dialog) return null;
+
+    const existing = dialog.querySelector(`#${MODAL_HELPER_ID}`);
+    if (existing) return existing;
+
+    const helper = document.createElement("button");
+    helper.id = MODAL_HELPER_ID;
+    helper.type = "button";
+    helper.className = "lra-modal-note-helper";
+    helper.textContent = "Use referral note";
+    helper.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      fillConnectModalNote(dialog, helper);
+    });
+
+    const addNoteButton = findAddNoteButton(dialog);
+    const footer =
+      dialog.querySelector(".artdeco-modal__footer") ||
+      addNoteButton?.parentElement ||
+      dialog.querySelector("[data-test-modal-footer]") ||
+      dialog;
+
+    footer.insertBefore(helper, footer.firstChild);
+    return helper;
+  }
+
+  function findConnectDialog() {
+    const dialogs = Array.from(
+      document.querySelectorAll("[role='dialog'], .artdeco-modal"),
+    );
+
+    return dialogs.find((dialog) => {
+      if (!isVisible(dialog)) return false;
+      const text = cleanText(dialog.innerText || dialog.textContent || "");
+      return /\b(add a note|send invitation|invitation)\b/i.test(text);
+    });
+  }
+
+  function extractPersonNameFromDialog(dialog) {
+    const text = cleanText(dialog.innerText || dialog.textContent || "");
+    const match = text.match(/\b(?:invite|invitation to|connect with)\s+([^,.\n]+?)(?:\s+to\b|$)/i);
+    return cleanPersonName(match?.[1] || "");
+  }
+
+  function personalizeConnectionNote(note, recipientName) {
+    const text = cleanText(note);
+    const firstName = firstNameForGreeting(recipientName);
+    if (!text || !firstName) return text;
+
+    if (/^hi\s*,/i.test(text)) {
+      return text.replace(/^hi\s*,/i, `Hi ${firstName},`);
+    }
+
+    if (/^hello\s*,/i.test(text)) {
+      return text.replace(/^hello\s*,/i, `Hi ${firstName},`);
+    }
+
+    if (/^hi\s+[^,]{1,40},/i.test(text)) {
+      return text.replace(/^hi\s+[^,]{1,40},/i, `Hi ${firstName},`);
+    }
+
+    return `Hi ${firstName}, ${text}`;
+  }
+
+  function firstNameForGreeting(name) {
+    const first = cleanPersonName(name).split(/\s+/)[0] || "";
+    if (!first) return "";
+    if (first === first.toLowerCase()) {
+      return first.charAt(0).toUpperCase() + first.slice(1);
+    }
+    return first;
+  }
+
+  function recentActiveRecipientName() {
+    if (!activeRecipientName) return "";
+    if (Date.now() - activeRecipientNameSavedAt > 60000) return "";
+    return activeRecipientName;
+  }
+
+  function cleanPersonName(value) {
+    return cleanText(value)
+      .replace(/\b(?:view|open)\s+.+?\s+profile\b/gi, "")
+      .replace(/\b(?:1st|2nd|3rd\+?|3rd)\b/gi, "")
+      .replace(/\b(?:connect|message|follow|more)\b/gi, "")
+      .replace(/[•·|].*$/g, "")
+      .replace(/[^\p{L}\p{M}\s.'-]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async function fillConnectModalNote(dialog, helper) {
+    if (!helper) return false;
+
+    const originalText = helper.textContent;
+    helper.disabled = true;
+    helper.textContent = "Filling...";
+
+    try {
+      const context = await activeOutreachContext();
+      const note = personalizeConnectionNote(
+        context?.connectionMessage || "",
+        recentActiveRecipientName() || extractPersonNameFromDialog(dialog),
+      )
+        .trim()
+        .slice(0, 300);
+      if (!note) throw new Error("Missing outreach note.");
+
+      let field = findNoteTextField(dialog);
+      if (!field) {
+        const addNoteButton = findAddNoteButton(dialog);
+        if (addNoteButton) clickElement(addNoteButton);
+        field = await waitForNoteTextField(dialog);
+      }
+
+      if (!field) throw new Error("No note field.");
+
+      fillTextField(field, note);
+      helper.textContent = "Note filled";
+      return true;
+    } catch (error) {
+      helper.textContent = modalHelperErrorText(error);
+      helper.title = error?.message || String(error);
+      return false;
+    } finally {
+      window.setTimeout(() => {
+        helper.disabled = false;
+        helper.textContent = originalText;
+      }, 1800);
+    }
+  }
+
+  function findAddNoteButton(dialog) {
+    return findButtonByText(dialog, /\badd a note\b/i);
+  }
+
+  function findNoteTextField(dialog) {
+    const fields = Array.from(
+      dialog.querySelectorAll("textarea, [contenteditable='true'], input[type='text']"),
+    );
+    return fields.find(isVisible) || null;
+  }
+
+  async function waitForNoteTextField(dialog, timeoutMs = 1800) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const field = findNoteTextField(dialog);
+      if (field) return field;
+      await sleep(100);
+    }
+
+    return null;
+  }
+
+  function fillTextField(field, text) {
+    if (field.isContentEditable || field.matches("[contenteditable='true']")) {
+      field.focus();
+      field.textContent = text;
+      field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      return;
+    }
+
+    const prototype =
+      field.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+
+    field.focus();
+    if (setter) {
+      setter.call(field, text);
+    } else {
+      field.value = text;
+    }
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  async function activeOutreachContext() {
+    const result = await chrome.storage.local.get(ACTIVE_OUTREACH_CONTEXT_KEY);
+    return result?.[ACTIVE_OUTREACH_CONTEXT_KEY] || null;
+  }
+
+  function clickElement(element) {
+    element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    element.click();
+  }
+
+  function rowHelperErrorText(error) {
+    const text = error?.message || String(error);
+    if (/missing outreach note/i.test(text)) return "Open from app";
+    if (/no connect action/i.test(text)) return "No connect";
+    if (/no connect modal/i.test(text)) return "No modal";
+    return "Try again";
+  }
+
+  function modalHelperErrorText(error) {
+    const text = error?.message || String(error);
+    if (/missing outreach note/i.test(text)) return "Open from app";
+    if (/no note field/i.test(text)) return "Click Add note";
+    return "Try again";
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   function extractJob() {
@@ -1205,10 +1660,75 @@
         border-color: #004182;
       }
 
+      .${ROW_HELPER_CLASS} {
+        align-items: center;
+        appearance: none;
+        background: #eef6ff;
+        border: 1px solid #0a66c2;
+        border-radius: 999px;
+        color: #0a66c2;
+        cursor: pointer;
+        display: inline-flex;
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        justify-content: center;
+        line-height: 18px;
+        margin-right: 8px;
+        min-height: 34px;
+        padding: 6px 14px;
+        white-space: nowrap;
+      }
+
+      .${ROW_HELPER_CLASS}:hover {
+        background: #dceeff;
+      }
+
+      .${ROW_HELPER_CLASS}:disabled {
+        cursor: default;
+        opacity: 0.75;
+      }
+
+      #${MODAL_HELPER_ID}.lra-modal-note-helper {
+        align-items: center;
+        appearance: none;
+        background: #0a66c2;
+        border: 1px solid #0a66c2;
+        border-radius: 999px;
+        color: #fff;
+        cursor: pointer;
+        display: inline-flex;
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        justify-content: center;
+        line-height: 18px;
+        margin-right: 8px;
+        min-height: 34px;
+        padding: 6px 14px;
+        white-space: nowrap;
+      }
+
+      #${MODAL_HELPER_ID}.lra-modal-note-helper:hover {
+        background: #004182;
+        border-color: #004182;
+      }
+
+      #${MODAL_HELPER_ID}.lra-modal-note-helper:disabled {
+        cursor: default;
+        opacity: 0.75;
+      }
+
       @media (max-width: 760px) {
         #${WRAP_ID}.lra-floating-wrap {
           bottom: 84px;
           right: 12px;
+        }
+
+        .${ROW_HELPER_CLASS},
+        #${MODAL_HELPER_ID}.lra-modal-note-helper {
+          font-size: 13px;
+          padding: 6px 10px;
         }
       }
     `;

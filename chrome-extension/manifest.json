@@ -21,9 +21,20 @@
         "https://linkedin.com/jobs/*",
         "https://*.linkedin.com/in/*",
         "https://www.linkedin.com/in/*",
-        "https://linkedin.com/in/*"
+        "https://linkedin.com/in/*",
+        "https://*.linkedin.com/search/results/people/*",
+        "https://www.linkedin.com/search/results/people/*",
+        "https://linkedin.com/search/results/people/*"
       ],
       "js": ["pageAction.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://localhost:3000/*",
+        "https://*.vercel.app/*"
+      ],
+      "js": ["webAppBridge.js"],
       "run_at": "document_idle"
     }
   ],

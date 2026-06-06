@@ -1,6 +1,11 @@
 // Deterministic referral plan generation. No LLMs, API keys, or network calls.
 
-import { buildLinkedInPeopleSearchUrl, defaultSearchQueries } from "./linkedin";
+import {
+  buildLinkedInPeopleSearchUrl,
+  defaultSearchQueries,
+  normalizeLinkedInCompanyId,
+  removeLinkedInLocationFromQuery,
+} from "./linkedin";
 import { cleanJobTitle } from "./jobText";
 import type { ReferralPlan, JobData } from "./types";
 
@@ -8,10 +13,11 @@ export function buildRulePlan(job: JobData): ReferralPlan {
   const company = job.company || "the company";
   const title = cleanJobTitle(job.jobTitle || "the role");
   const sponsorshipSummary = sponsorshipSummaryFor(job);
+  const currentCompanyId = normalizeLinkedInCompanyId(job.companyLinkedInId || "");
   const queries = defaultSearchQueries({
     company,
     jobTitle: title,
-    city: cityFromLocation(job.location),
+    useCompanyKeyword: !currentCompanyId,
   });
 
   const categories: Array<{ category: string; whyRelevant: string; q: string }> = [
@@ -42,15 +48,23 @@ export function buildRulePlan(job: JobData): ReferralPlan {
     ]
       .filter(Boolean)
       .join("\n"),
-    targetPeople: categories.map(({ category, whyRelevant, q }) => ({
-      category,
-      whyRelevant,
-      searchQuery: q,
-      linkedinSearchUrl: buildLinkedInPeopleSearchUrl(q),
-      connectionMessage: connectionMessageFor(company, title),
-      followUpMessage: "",
-      referralAskMessage: "",
-    })),
+    targetPeople: categories.map(({ category, whyRelevant, q }) => {
+      const searchQuery = removeLinkedInLocationFromQuery(q, job.location);
+      return {
+        category,
+        whyRelevant,
+        searchQuery,
+        searchLocation: job.location || "",
+        currentCompanyId,
+        currentCompanyName: currentCompanyId ? company : "",
+        linkedinSearchUrl: buildLinkedInPeopleSearchUrl(searchQuery, {
+          currentCompanyId,
+        }),
+        connectionMessage: connectionMessageFor(company, title),
+        followUpMessage: "",
+        referralAskMessage: "",
+      };
+    }),
   };
 }
 
@@ -72,23 +86,6 @@ function sponsorshipSummaryFor(job: JobData): string {
   }
 
   return "Visa sponsorship: unknown. Ask a recruiter or contact to confirm before investing much time.";
-}
-
-function cityFromLocation(location = ""): string {
-  const value = location
-    .replace(/\u00a0/g, " ")
-    .split(/[·•|]/)[0]
-    .split(",")[0]
-    .trim()
-    .replace(/^greater\s+/i, "")
-    .replace(/\s+(metropolitan\s+area|metro\s+area|area)$/i, "")
-    .trim();
-
-  if (!value || /^(remote|hybrid|on-site|onsite|united states|canada)$/i.test(value)) {
-    return "";
-  }
-
-  return value;
 }
 
 function fitLinkedInMessage(company: string, title: string): string {

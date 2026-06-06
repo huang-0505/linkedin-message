@@ -220,6 +220,8 @@ function buildQueryParams(job) {
   const params = new URLSearchParams();
   if (job.jobTitle) params.set("jobTitle", job.jobTitle);
   if (job.company) params.set("company", job.company);
+  if (job.companyLinkedInId) params.set("companyLinkedInId", job.companyLinkedInId);
+  if (job.companyLinkedInUrl) params.set("companyLinkedInUrl", job.companyLinkedInUrl);
   if (job.location) params.set("location", job.location);
   if (job.jobUrl) params.set("jobUrl", job.jobUrl);
   if (job.jobDescription) {

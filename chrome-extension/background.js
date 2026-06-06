@@ -9,11 +9,14 @@ importScripts("config.js");
 const WEB_APP_URL =
   globalThis.LRA_WEB_APP_URL || "http://localhost:3000/referral";
 const MAX_URL_LEN = 7500;
+const ACTIVE_OUTREACH_CONTEXT_KEY = "lra:active-outreach-context";
 const LINKEDIN_PAGE_ACTION_URLS = [
   "https://*.linkedin.com/jobs/*",
   "https://linkedin.com/jobs/*",
   "https://*.linkedin.com/in/*",
   "https://linkedin.com/in/*",
+  "https://*.linkedin.com/search/results/people/*",
+  "https://linkedin.com/search/results/people/*",
 ];
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -46,6 +49,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LRA_REMEMBER_OUTREACH_CONTEXT") {
+    rememberOutreachContext(message.context)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: error?.message || String(error) }),
+      );
+    return true;
+  }
+
   return false;
 });
 
@@ -56,7 +68,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (info.status !== "complete" || !isLinkedInJobOrProfileUrl(tab.url)) return;
+  if (info.status !== "complete" || !isLinkedInActionUrl(tab.url)) return;
   ensurePageAction(tabId).catch((error) =>
     console.warn("LinkedIn page action inject failed", error),
   );
@@ -66,7 +78,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   chrome.tabs
     .get(tabId)
     .then((tab) => {
-      if (!isLinkedInJobOrProfileUrl(tab.url)) return;
+      if (!isLinkedInActionUrl(tab.url)) return;
       return ensurePageAction(tabId);
     })
     .catch((error) =>
@@ -127,10 +139,36 @@ async function openCurrentJobFromTab(tabId) {
   await openWebApp(job);
 }
 
+async function rememberOutreachContext(context) {
+  if (!isValidOutreachContext(context)) {
+    throw new Error("Missing outreach note.");
+  }
+
+  await chrome.storage.local.set({
+    [ACTIVE_OUTREACH_CONTEXT_KEY]: {
+      category: String(context.category || "").slice(0, 120),
+      searchQuery: String(context.searchQuery || "").slice(0, 240),
+      connectionMessage: String(context.connectionMessage || "").slice(0, 1200),
+      savedAt: Date.now(),
+    },
+  });
+}
+
+function isValidOutreachContext(context) {
+  return Boolean(
+    context &&
+      typeof context === "object" &&
+      typeof context.connectionMessage === "string" &&
+      context.connectionMessage.trim(),
+  );
+}
+
 function buildQueryParams(job) {
   const params = new URLSearchParams();
   if (job.jobTitle) params.set("jobTitle", job.jobTitle);
   if (job.company) params.set("company", job.company);
+  if (job.companyLinkedInId) params.set("companyLinkedInId", job.companyLinkedInId);
+  if (job.companyLinkedInUrl) params.set("companyLinkedInUrl", job.companyLinkedInUrl);
   if (job.location) params.set("location", job.location);
   if (job.jobUrl) params.set("jobUrl", job.jobUrl);
   if (job.jobDescription) params.set("jobDescription", job.jobDescription.slice(0, 4000));
@@ -228,13 +266,16 @@ async function ensurePageAction(tabId) {
   });
 }
 
-function isLinkedInJobOrProfileUrl(rawUrl) {
+function isLinkedInActionUrl(rawUrl) {
   try {
     const url = new URL(rawUrl || "");
     const host = url.hostname.toLowerCase();
     const parts = url.pathname.split("/").filter(Boolean);
     const isLinkedIn = host === "linkedin.com" || host.endsWith(".linkedin.com");
-    return isLinkedIn && (parts[0] === "jobs" || (parts[0] === "in" && parts[1]));
+    if (!isLinkedIn) return false;
+    if (parts[0] === "jobs") return true;
+    if (parts[0] === "in" && parts[1]) return true;
+    return parts[0] === "search" && parts[1] === "results" && parts[2] === "people";
   } catch (_) {
     return false;
   }

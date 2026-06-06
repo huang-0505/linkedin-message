@@ -19,14 +19,18 @@
     const headerRoot = findHeaderRoot(titleEl, detailsRoot);
     const headerLines = cleanLines(headerRoot?.innerText || headerRoot?.textContent || "");
     const sponsorship = analyzeSponsorship(description);
+    const companyName = (
+      companyFromHeader(headerRoot, headerLines, rawTitle) ||
+      companyFromCardLines(selectedCardLines, rawTitle) ||
+      companyFromDescription(description)
+    ).slice(0, 200);
+    const companyMeta = companyLinkedInMeta(headerRoot, companyName);
 
     return {
       jobTitle: jobTitle.slice(0, 200),
-      company: (
-        companyFromHeader(headerRoot, headerLines, rawTitle) ||
-        companyFromCardLines(selectedCardLines, rawTitle) ||
-        companyFromDescription(description)
-      ).slice(0, 200),
+      company: companyName,
+      companyLinkedInId: companyMeta.id,
+      companyLinkedInUrl: companyMeta.url,
       location: (
         locationFromHeader(headerLines, rawTitle) ||
         locationFromCardLines(selectedCardLines, rawTitle) ||
@@ -219,6 +223,77 @@
     }
 
     return "";
+  }
+
+  function companyLinkedInMeta(root, companyName) {
+    if (!root) return { id: "", url: "" };
+
+    const anchors = Array.from(root.querySelectorAll("a[href*='/company/']"));
+    for (const anchor of anchors) {
+      if (!isVisible(anchor)) continue;
+
+      const text = cleanCompanyLine(anchor.innerText || anchor.textContent || "", "");
+      if (companyName && text && !sameCompanyText(text, companyName)) continue;
+
+      const href = anchor.href || anchor.getAttribute("href") || "";
+      return {
+        id: companyIdFromElement(anchor),
+        url: canonicalCompanyUrl(href),
+      };
+    }
+
+    return { id: companyIdFromElement(root), url: "" };
+  }
+
+  function sameCompanyText(a, b) {
+    return normalizeCompanyText(a) === normalizeCompanyText(b);
+  }
+
+  function normalizeCompanyText(value) {
+    return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, "");
+  }
+
+  function companyIdFromElement(el) {
+    const parts = [];
+    if (el.href) parts.push(el.href);
+    if (typeof el.getAttributeNames === "function") {
+      for (const name of el.getAttributeNames()) {
+        parts.push(el.getAttribute(name) || "");
+      }
+    }
+    parts.push((el.outerHTML || "").slice(0, 2500));
+
+    return companyIdFromText(parts.join(" "));
+  }
+
+  function companyIdFromText(text) {
+    const decoded = safeDecodeURIComponent(text || "");
+    return (
+      decoded.match(/urn:li:(?:fsd_)?company:(\d+)/i)?.[1] ||
+      decoded.match(/[?&](?:companyId|currentCompany)=\[?"?(\d+)/i)?.[1] ||
+      decoded.match(/\/company\/(\d+)(?:[/?#]|$)/i)?.[1] ||
+      ""
+    );
+  }
+
+  function canonicalCompanyUrl(href) {
+    try {
+      const url = new URL(href, window.location.href);
+      const parts = url.pathname.split("/").filter(Boolean);
+      const companyIndex = parts.indexOf("company");
+      const slug = companyIndex !== -1 ? parts[companyIndex + 1] || "" : "";
+      return slug ? `https://www.linkedin.com/company/${slug}/` : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function safeDecodeURIComponent(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
+      return value;
+    }
   }
 
   function companyFromCardLines(lines, rawTitle) {
