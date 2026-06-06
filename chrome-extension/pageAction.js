@@ -6,15 +6,17 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.2.1";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V4__";
+  const EXTENSION_VERSION = "0.3.0";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V5__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
   const ROW_HELPER_CLASS = "lra-row-connect-helper";
   const MODAL_HELPER_ID = "lra-modal-note-helper";
   const SEARCH_STATUS_ID = "lra-search-helper-status";
+  const CONNECT_STATUS_ID = "lra-connect-intent-status";
   const ACTIVE_OUTREACH_CONTEXT_KEY = "lra:active-outreach-context";
+  const CONNECT_INTENT_KEY = "lra:connect-intent";
   let lastUrl = "";
   let injectTimer = 0;
   let activeRecipientName = "";
@@ -63,19 +65,23 @@
     if (!mode) {
       removeButton();
       removeSearchStatus();
+      removeConnectStatus();
       return;
     }
 
+    restoreConnectIntentName();
     injectConnectModalHelper();
 
     if (mode === "search") {
       removeButton();
+      removeConnectStatus();
       const helperCount = injectSearchResultHelpers();
       updateSearchStatus(helperCount);
       return;
     }
 
     removeSearchStatus();
+    updateProfileConnectStatus(mode);
 
     const existing = document.getElementById(BUTTON_ID);
     if (existing && existing.dataset.mode === mode && !force) return;
@@ -209,34 +215,27 @@
 
     for (const { row, actionButton } of searchResultActionTargets().slice(0, 40)) {
       const existingHelper = helperForActionButton(actionButton);
-      if (existingHelper) {
+      if (existingHelper?.dataset.lraVersion === EXTENSION_VERSION) {
         helperCount += 1;
         continue;
       }
+      existingHelper?.remove();
 
       if (!actionButton?.parentElement) continue;
 
-      const canConnect = canOpenConnectFromRow(row, actionButton);
       const helper = document.createElement("button");
       helper.type = "button";
       helper.className = ROW_HELPER_CLASS;
+      helper.dataset.lraVersion = EXTENSION_VERSION;
       helper.dataset.lraActionFor = rowActionKind(actionButton) || "unknown";
-
-      if (canConnect) {
-        helper.textContent = "Connect + note";
-        helper.title =
-          "Open LinkedIn's connect modal for this row, then use your referral note.";
-        helper.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          handleRowConnectClick(row, helper, actionButton);
-        });
-      } else {
-        helper.textContent = "No connect";
-        helper.disabled = true;
-        helper.title =
-          "LinkedIn is not showing a Connect action on this search row. Open the profile if you want to connect manually.";
-      }
+      helper.textContent = "CN";
+      helper.title =
+        "Connect + note. If LinkedIn does not expose Connect here, open the profile with your note ready.";
+      helper.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handleRowConnectClick(row, helper, actionButton);
+      });
 
       actionButton.parentElement.insertBefore(helper, actionButton);
       helperCount += 1;
@@ -342,11 +341,6 @@
     return "";
   }
 
-  function canOpenConnectFromRow(row, actionButton) {
-    if (rowActionKind(actionButton) === "connect") return true;
-    return Boolean(findMoreButton(row));
-  }
-
   function updateSearchStatus(helperCount) {
     let status = document.getElementById(SEARCH_STATUS_ID);
     if (!status) {
@@ -378,6 +372,18 @@
     return "";
   }
 
+  function profileUrlFromRow(row) {
+    const profileLinks = Array.from(row.querySelectorAll('a[href*="/in/"]'));
+
+    for (const link of profileLinks) {
+      const href = link.href || link.getAttribute("href") || "";
+      const url = canonicalProfileUrlFromHref(href);
+      if (url) return url;
+    }
+
+    return "";
+  }
+
   async function handleRowConnectClick(row, helper, actionButton) {
     const originalText = helper.textContent;
     helper.disabled = true;
@@ -392,7 +398,19 @@
       activeRecipientName = extractPersonNameFromRow(row);
       activeRecipientNameSavedAt = Date.now();
       const opened = await tryOpenNativeConnect(row, actionButton);
-      if (!opened) throw new Error("No connect action.");
+      if (!opened) {
+        const profileUrl = profileUrlFromRow(row);
+        if (!profileUrl) throw new Error("No profile URL.");
+
+        rememberConnectIntent({
+          name: activeRecipientName,
+          profileUrl,
+          savedAt: Date.now(),
+        });
+        helper.textContent = "Profile...";
+        window.location.assign(profileUrl);
+        return;
+      }
 
       const dialog = await waitForConnectModal();
       if (!dialog) throw new Error("No connect modal.");
@@ -581,6 +599,92 @@
     return activeRecipientName;
   }
 
+  function rememberConnectIntent(intent) {
+    try {
+      window.sessionStorage.setItem(
+        CONNECT_INTENT_KEY,
+        JSON.stringify({
+          name: String(intent.name || "").slice(0, 120),
+          profileUrl: canonicalProfileUrlFromHref(intent.profileUrl || ""),
+          savedAt: Number(intent.savedAt || Date.now()),
+        }),
+      );
+    } catch (_) {
+      // If session storage is unavailable, the manual profile fallback still opens.
+    }
+  }
+
+  function readConnectIntent() {
+    try {
+      const raw = window.sessionStorage.getItem(CONNECT_INTENT_KEY);
+      if (!raw) return null;
+
+      const intent = JSON.parse(raw);
+      const savedAt = Number(intent.savedAt || 0);
+      if (!intent.profileUrl || Date.now() - savedAt > 10 * 60 * 1000) {
+        clearConnectIntent();
+        return null;
+      }
+
+      return intent;
+    } catch (_) {
+      clearConnectIntent();
+      return null;
+    }
+  }
+
+  function restoreConnectIntentName() {
+    const intent = readConnectIntent();
+    if (!intent?.name) return;
+
+    activeRecipientName = intent.name;
+    activeRecipientNameSavedAt = Date.now();
+  }
+
+  function clearConnectIntent() {
+    try {
+      window.sessionStorage.removeItem(CONNECT_INTENT_KEY);
+    } catch (_) {}
+  }
+
+  function updateProfileConnectStatus(mode) {
+    if (mode !== "profile") {
+      removeConnectStatus();
+      return;
+    }
+
+    const intent = readConnectIntent();
+    if (!intent) {
+      removeConnectStatus();
+      return;
+    }
+
+    const targetSlug = profileSlugFromHref(intent.profileUrl || "");
+    const currentSlug = profileSlug();
+    if (targetSlug && currentSlug && targetSlug !== currentSlug) {
+      removeConnectStatus();
+      return;
+    }
+
+    showConnectStatus("CN ready: open Connect, then use the referral note.");
+  }
+
+  function showConnectStatus(text) {
+    let status = document.getElementById(CONNECT_STATUS_ID);
+    if (!status) {
+      status = document.createElement("div");
+      status.id = CONNECT_STATUS_ID;
+      status.className = "lra-connect-intent-status";
+      document.body.appendChild(status);
+    }
+
+    status.textContent = text;
+  }
+
+  function removeConnectStatus() {
+    document.getElementById(CONNECT_STATUS_ID)?.remove();
+  }
+
   function cleanPersonName(value) {
     return cleanText(value)
       .replace(/\b(?:view|open)\s+.+?\s+profile\b/gi, "")
@@ -619,6 +723,8 @@
       if (!field) throw new Error("No note field.");
 
       fillTextField(field, note);
+      clearConnectIntent();
+      showConnectStatus("CN: note filled. Click Send.");
       helper.textContent = "Note filled";
       return true;
     } catch (error) {
@@ -695,6 +801,7 @@
     if (/missing outreach note/i.test(text)) return "Open from app";
     if (/no connect action/i.test(text)) return "No connect";
     if (/no connect modal/i.test(text)) return "No modal";
+    if (/no profile URL/i.test(text)) return "No profile";
     return "Try again";
   }
 
@@ -1696,6 +1803,17 @@
     }
   }
 
+  function profileSlugFromHref(href) {
+    try {
+      const url = new URL(href, window.location.href);
+      const parts = url.pathname.split("/").filter(Boolean);
+      const inIndex = parts.indexOf("in");
+      return inIndex !== -1 ? parts[inIndex + 1] || "" : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
   function nameFromTitle() {
     const rawTitle =
       pickMeta(["meta[property='og:title']", "meta[name='twitter:title']"]) ||
@@ -1720,6 +1838,11 @@
     return slug
       ? `https://www.linkedin.com/in/${slug}/`
       : window.location.href.split(/[?#]/)[0];
+  }
+
+  function canonicalProfileUrlFromHref(href) {
+    const slug = profileSlugFromHref(href);
+    return slug ? `https://www.linkedin.com/in/${slug}/` : "";
   }
 
   function topCardText() {
@@ -1814,7 +1937,8 @@
         opacity: 1;
       }
 
-      #${SEARCH_STATUS_ID}.lra-search-helper-status {
+      #${SEARCH_STATUS_ID}.lra-search-helper-status,
+      #${CONNECT_STATUS_ID}.lra-connect-intent-status {
         background: #111827;
         border: 1px solid rgba(255, 255, 255, 0.24);
         border-radius: 999px;
