@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.5.6";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V22__";
+  const EXTENSION_VERSION = "0.5.7";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V23__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -1617,7 +1617,7 @@
           .filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
           .slice(0, 30)
           .map((e) => ({ role: e.getAttribute("role") || "", cls: (e.className || "").toString().slice(0, 60), txt: (e.innerText || "").replace(/\s+/g, " ").slice(0, 70) }));
-        console.info("[Connect+Note] dialog dump:", cand);
+        console.info("[Connect+Note] dialog dump:", JSON.stringify(cand));
       } catch (_) {}
     }
     return null;
@@ -1670,26 +1670,19 @@
   function findConnectDialog() {
     const WRAP = "[role='dialog'], [role='alertdialog'], [aria-modal='true'], .artdeco-modal, [data-test-modal]";
     const dialogs = Array.from(document.querySelectorAll(WRAP));
-    // Gate on a VISIBLE control inside (not the wrapper's own rect — LinkedIn
-    // sometimes wraps the modal in a display:contents/0x0 element). The choice
-    // dialog has a visible "Add a note"/"Send without a note" button; the note
-    // dialog has a visible textarea.
     const match = dialogs.find((d) => {
+      if (!d || !d.querySelectorAll) return false;
+      const text = cleanText(d.innerText || d.textContent || "");
+      // Text is the robust signal — independent of how the buttons are coded.
+      if (/(add a note|add note|include a note|send without a note|personalize your invitation|your invitation to|connect with)/i.test(text)) return true;
       if (findVisibleNoteTextarea(d)) return true;
       if (findAddNoteButton(d)) return true;
-      if (findButtonByText(d, /send without a note/i)) return true;
       return false;
     });
     if (match) return match;
-    // Last-ditch: controls exist but under an unrecognized wrapper. Find them
-    // anywhere and climb to the nearest container. These labels are unique to
-    // the invite flow, so no false match against the rest of the page.
-    const anchor =
-      findVisibleNoteTextarea(document) ||
-      findButtonByText(document, /\b(add\s+(?:a\s+)?note|send without a note)\b/i);
-    if (anchor) {
-      return (anchor.closest && (anchor.closest(WRAP) || anchor.closest("[aria-labelledby], section, div"))) || document.body;
-    }
+    // Fallback: controls exist under an unrecognized wrapper.
+    const anchor = findVisibleNoteTextarea(document) || findAddNoteButton(document);
+    if (anchor) return (anchor.closest && (anchor.closest(WRAP) || anchor.closest("[aria-labelledby], section, div"))) || document.body;
     return null;
   }
 
@@ -1920,24 +1913,14 @@
   }
 
   function findAddNoteButton(dialog) {
-    const buttons = actionElements(dialog).filter((button) => {
-      if (!isVisible(button)) return false;
-      if (button.classList.contains(ROW_HELPER_CLASS)) return false;
-      if (button.classList.contains(ROW_BUTTON_CLASS)) return false;
-      return true;
-    });
-
-    const exact = buttons.find((button) => {
-      const text = cleanText(button.innerText || button.textContent || "");
-      return /^add a note$/i.test(text);
-    });
-    if (exact) return exact;
-
-    return buttons.find((button) => {
-      const label = buttonLabel(button);
-      if (/\bsend\s+without\b/i.test(label)) return false;
-      if (/\bsend\s+(invitation|now)?\b/i.test(label)) return false;
-      return /\b(add\s+(?:a\s+)?note|add note|include\s+(?:a\s+)?note|personalize(?:\s+invite|\s+invitation)?|customize(?:\s+invite|\s+invitation)?)\b/i.test(label);
+    if (!dialog || !dialog.querySelectorAll) return null;
+    const pat = /\b(add\s+(?:a\s+)?note|include\s+(?:a\s+)?note|personalize|customize)\b/i;
+    const nodes = Array.from(dialog.querySelectorAll("button, [role='button'], a[role='button']"));
+    return nodes.find((el) => {
+      if (!isVisible(el)) return false;
+      if (el.classList && (el.classList.contains(ROW_BUTTON_CLASS) || el.classList.contains(ROW_HELPER_CLASS))) return false;
+      const label = cleanText([el.innerText || el.textContent || "", el.getAttribute && el.getAttribute("aria-label") || ""].join(" "));
+      return pat.test(label) && !/send without/i.test(label);
     }) || null;
   }
 
