@@ -724,14 +724,26 @@ function loadPageAction({ doc, storage = {} }) {
 {
   const { doc } = makePeopleSearchDocument({ rows: [] });
   const addNote = mkButton({ label: "Add note" });
+  const sendWithoutNote = mkButton({ label: "Send without a note" });
   const cancel = mkButton({ label: "Cancel" });
   const dialog = {
     querySelectorAll(selector) {
-      return selector.includes("button") ? [cancel, addNote] : [];
+      return selector.includes("button") ? [cancel, sendWithoutNote, addNote] : [];
     },
   };
   const { exports } = loadPageAction({ doc });
   assert.equal(exports.findAddNoteButton(dialog), addNote);
+}
+
+// -- Test 8: modal name extraction handles LinkedIn personalize wording -------
+{
+  const { doc } = makePeopleSearchDocument({ rows: [] });
+  const dialog = {
+    innerText: "Add a note to your invitation? Personalize your invitation to Mary Gallagher by adding a note.",
+    textContent: "Add a note to your invitation? Personalize your invitation to Mary Gallagher by adding a note.",
+  };
+  const { exports } = loadPageAction({ doc });
+  assert.equal(exports.extractPersonNameFromDialog(dialog), "Mary Gallagher");
 }
 
 // -- Test 6: normalizeStats date rollover ------------------------------------

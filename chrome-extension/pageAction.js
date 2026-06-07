@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.5.2";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V18__";
+  const EXTENSION_VERSION = "0.5.5";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V21__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -946,9 +946,11 @@
     // Diagnostic: also log to console so user can verify in DevTools.
     try { console.info("[Connect+Note] auto-open running for", slug, intent); } catch (_) {}
     cnLog("intent consumed", { slug, profileUrl: intent.profileUrl, name: intent.name });
+    cnLog("pending intent consumed", { slug, profileUrl: intent.profileUrl, name: intent.name });
 
     activeRecipientName = intent.name || "";
     activeRecipientNameSavedAt = Date.now();
+    cnLog("active recipient name", { name: activeRecipientName });
     setAutoConnectStatus("Connect + Note: finding Connect...");
 
     const connectClicked = await clickProfileConnectAction(26000);
@@ -958,10 +960,10 @@
       return;
     }
 
-    const dialog = await waitForConnectModal(8000);
+    const dialog = await waitForConnectModal(15000);
     if (!dialog) {
       cnFail("connect modal not found", { slug });
-      setAutoConnectStatus("Connect + Note: invite modal didn't open.", true);
+      setAutoConnectStatus("Connect opened. If the modal is visible, click Use referral note.");
       return;
     }
     if (checkWeeklyLimitModal(dialog)) {
@@ -970,7 +972,7 @@
       return;
     }
     const modalHelper = injectConnectModalHelper(dialog);
-    const filled = await fillConnectModalNote(dialog, modalHelper);
+    const filled = await fillConnectModalNote(dialog, modalHelper, intent);
     if (filled) {
       setAutoConnectStatus("Connect + Note: note filled. Click Send.");
     } else {
@@ -990,7 +992,7 @@
     status.textContent = text;
     status.style.background = isError ? "#b91c1c" : "#0a66c2";
     window.clearTimeout(status.dataset.hideTimer || 0);
-    const timer = window.setTimeout(() => status.remove(), 8000);
+    const timer = window.setTimeout(() => status.remove(), isError ? 3000 : 8000);
     status.dataset.hideTimer = String(timer);
   }
 
@@ -1056,46 +1058,17 @@
   }
 
   function findProfileConnectButton() {
-    // Source candidates from BOTH the whole document AND the top-card-scoped
-    // selectors. Document gets us everything in production. The scoped scan
-    // ensures tests (which often stub only a top-card mock) still find
-    // buttons. Dedupe by identity.
-    const everything = [];
-    const seen = new Set();
-    try {
-      for (const el of actionElements(document)) {
-        if (!seen.has(el)) { seen.add(el); everything.push(el); }
-      }
-    } catch (_) {}
-    for (const el of profileActionCandidates()) {
-      if (!seen.has(el)) { seen.add(el); everything.push(el); }
-    }
-
-    const candidates = everything.filter((el) => {
+    // Source candidates ONLY from the top-card / main column. Whole-document
+    // searches pick up sidebar "More profiles for you" Connect buttons and
+    // would invite the wrong person on 3rd-degree profiles.
+    const candidates = profileActionCandidates().filter((el) => {
       if (!isVisible(el)) return false;
       if (el.classList.contains(ROW_BUTTON_CLASS)) return false;
       if (el.classList.contains(ROW_HELPER_CLASS)) return false;
-      // Exclude well-known non-top-card regions:
-      const excludedAncestor = el.closest(
-        "aside, " +
-        ".scaffold-layout__aside, " +
-        ".global-nav, " +
-        "header.global-nav, " +
-        "nav, " +
-        ".artdeco-modal, " +
-        ".feed-shared-control-menu, " +
-        "[data-chameleon-result-urn], " +
-        ".entity-result, " +
-        ".reusable-search__result-container, " +
-        ".pv-browsemap-section, " +
-        ".similar-profiles, " +
-        ".browsemap-recommendation, " +
-        ".more-profiles, " +
-        ".pv-recent-activity-section, " +
-        ".pv-recommendations-section, " +
-        "footer",
-      );
-      if (excludedAncestor) return false;
+      // Even though candidates already come from main / top-card, keep the
+      // region filter as a belt-and-braces guard in case LinkedIn ever moves
+      // recommendation cards inside <main>.
+      if (isInExcludedProfileRegion(el)) return false;
       return true;
     });
 
@@ -1110,44 +1083,72 @@
       console.info("[Connect+Note] top-card candidates (" + candidates.length + "):", dump);
     } catch (_) {}
 
+    const targetFirstName = activeConnectTargetFirstName();
+
     // Pass 1: aria-label matches LinkedIn's standard "Invite ___ to connect".
-    const aria = candidates.find((el) => {
+    // When we know the intended recipient, only accept aria invites whose
+    // first name matches. If none match the target, skip this pass entirely
+    // (fall through to the exact/starts-with passes) rather than risk
+    // clicking a sibling card invite for someone else.
+    const ariaMatches = candidates.filter((el) => {
       const label = el.getAttribute("aria-label") || "";
       return /\binvite\b.*\bto connect\b/i.test(label);
     });
-    if (aria) return aria;
+    if (targetFirstName) {
+      const nameMatch = ariaMatches.find((el) => {
+        const label = el.getAttribute("aria-label") || "";
+        const m = label.match(/invite\s+(.+?)\s+to\s+connect/i);
+        const inviteFirst = m ? firstNameForGreeting(m[1] || "") : "";
+        return inviteFirst && inviteFirst === targetFirstName;
+      });
+      if (nameMatch) return nameMatch;
+      // No aria-invite for the right person — do NOT return any aria match.
+      // Fall through to the text-based passes (Pass 2/3) which are scoped
+      // to the same top-card candidates and so cannot pick a sidebar button.
+    } else if (ariaMatches.length > 0) {
+      return ariaMatches[0];
+    }
 
-    // Pass 2: visible text is exactly "Connect".
+    // Pass 2: visible text is exactly "Connect" (with the same name guard).
     const exact = candidates.find((el) => {
       const text = cleanText(el.innerText || el.textContent || "");
-      return /^connect$/i.test(text);
+      if (!/^connect$/i.test(text)) return false;
+      if (connectCandidateNameMismatch(el, targetFirstName)) return false;
+      return true;
     });
     if (exact) return exact;
 
     // Pass 3: text starts with "Connect" (handles "Connect now" etc.).
     const starts = candidates.find((el) => {
       const text = cleanText(el.innerText || el.textContent || "");
-      return /^connect\b/i.test(text) && !/\b(connected|connection)\b/i.test(text);
+      if (!/^connect\b/i.test(text)) return false;
+      if (/\b(connected|connection)\b/i.test(text)) return false;
+      if (connectCandidateNameMismatch(el, targetFirstName)) return false;
+      return true;
     });
     if (starts) return starts;
 
-    // Pass 4: ANY button anywhere with "connect" in combined label, excluding
-    // disqualifying words.
+    // Pass 4: ANY visible top-card button with "connect" in combined label,
+    // excluding disqualifying words.
     const loose = candidates.find((el) => {
       const label = buttonLabel(el).toLowerCase();
       if (!/\bconnect\b/.test(label)) return false;
       if (/\b(connected|connections?|follow|message|more|see all|remove connection|withdraw|pending|view profile|cancel|next|skip|edit|done)\b/.test(label)) return false;
+      if (connectCandidateNameMismatch(el, targetFirstName)) return false;
       return true;
     });
     if (loose) return loose;
 
-    // Pass 5: last-ditch — any visible button whose icon SVG has aria-label or
-    // title containing "connect" (LinkedIn sometimes uses an icon-only button).
+    // Pass 5: last-ditch — any top-card button whose icon SVG has aria-label
+    // or title containing "connect" (LinkedIn sometimes uses an icon-only
+    // button).
     const iconOnly = candidates.find((el) => {
-      const svg = el.querySelector("svg, use");
+      const svg = el.querySelector?.("svg, use");
       if (!svg) return false;
-      const aria = (svg.getAttribute("aria-label") || svg.getAttribute("title") || "").toLowerCase();
-      return /\bconnect\b/.test(aria) && !/\b(connected|connection)\b/.test(aria);
+      const svgAria = (svg.getAttribute?.("aria-label") || svg.getAttribute?.("title") || "").toLowerCase();
+      if (!/\bconnect\b/.test(svgAria) || /\b(connected|connection)\b/.test(svgAria)) return false;
+      if (connectCandidateNameMismatch(el, targetFirstName)) return false;
+      return true;
     });
     return iconOnly || null;
   }
@@ -1213,18 +1214,24 @@
   }
 
   function profileActionCandidates() {
+    // Scope to the top-card / main column ONLY. Right-rail "More profiles
+    // for you" lives in <aside> (sibling of <main>), so excluding the body
+    // structurally prevents sidebar Connect buttons from being candidates.
     const roots = [
       document.querySelector(".pv-top-card"),
       document.querySelector(".pv-top-card-v2-ctas"),
       document.querySelector(".pv-text-details__left-panel"),
       document.querySelector("main section:first-of-type"),
       document.querySelector("main"),
-      document.body,
     ].filter(Boolean);
+
+    // Only fall back to document.body when neither a top-card element nor
+    // <main> exists (unusual layout / very early hydration).
+    const finalRoots = roots.length > 0 ? roots : [document.body].filter(Boolean);
 
     const seen = new Set();
     const candidates = [];
-    for (const root of roots) {
+    for (const root of finalRoots) {
       if (!root?.querySelectorAll) continue;
       for (const el of actionElements(root)) {
         if (seen.has(el)) continue;
@@ -1233,6 +1240,50 @@
       }
     }
     return candidates;
+  }
+
+  // Single source of truth for non-top-card regions we must NEVER match
+  // candidates inside (sidebar, modals, nav, recommendation cards, etc.).
+  const PROFILE_ACTION_EXCLUDE_SELECTOR =
+    "aside, " +
+    ".scaffold-layout__aside, " +
+    ".global-nav, " +
+    "header.global-nav, " +
+    "nav, " +
+    ".artdeco-modal, " +
+    ".feed-shared-control-menu, " +
+    "[data-chameleon-result-urn], " +
+    ".entity-result, " +
+    ".reusable-search__result-container, " +
+    ".pv-browsemap-section, " +
+    ".similar-profiles, " +
+    ".browsemap-recommendation, " +
+    ".more-profiles, " +
+    ".pv-recent-activity-section, " +
+    ".pv-recommendations-section, " +
+    "footer";
+
+  function isInExcludedProfileRegion(el) {
+    if (!el?.closest) return false;
+    return Boolean(el.closest(PROFILE_ACTION_EXCLUDE_SELECTOR));
+  }
+
+  // Name guard. When we know the intended recipient's name, refuse to act on
+  // a Connect candidate whose aria-label invites a DIFFERENT person — that
+  // catches "More profiles for you" rail buttons even if region exclusion
+  // misses them.
+  function connectCandidateNameMismatch(el, targetFirstName) {
+    if (!targetFirstName) return false;
+    const aria = (el?.getAttribute?.("aria-label") || "");
+    const match = aria.match(/invite\s+(.+?)\s+to\s+connect/i);
+    if (!match) return false; // No aria-invite name to compare — let other passes decide.
+    const inviteFirst = firstNameForGreeting(match[1] || "");
+    if (!inviteFirst) return false;
+    return inviteFirst !== targetFirstName;
+  }
+
+  function activeConnectTargetFirstName() {
+    return firstNameForGreeting(recentActiveRecipientName() || "");
   }
 
   // Kept for backward compat with any other callers.
@@ -1254,6 +1305,18 @@
       const name = cleanPersonName(link.innerText || link.textContent || "");
       if (name) return name;
     }
+
+    for (const link of profileLinks) {
+      if (!isVisible(link)) continue;
+      const name = cleanPersonName(link.getAttribute("aria-label") || "");
+      if (name) return name;
+    }
+
+    const rowText = cleanText(row.innerText || row.textContent || "");
+    const beforeRelationship = rowText
+      .split(/\b(?:1st|2nd|3rd\+?|3rd|Connect|Message|Follow|More)\b/i)[0] || "";
+    const fallbackName = cleanPersonName(beforeRelationship);
+    if (fallbackName) return fallbackName;
 
     return "";
   }
@@ -1306,6 +1369,7 @@
 
       activeRecipientName = extractPersonNameFromRow(row);
       activeRecipientNameSavedAt = Date.now();
+      cnLog("row name extracted", { name: activeRecipientName });
       const profileUrl = profileUrlFromRow(row);
 
       const opened = await tryOpenNativeConnect(row);
@@ -1315,6 +1379,7 @@
           slug: profileSlugFromHref(profileUrl),
           name: activeRecipientName,
           profileUrl,
+          connectionMessage: context.connectionMessage,
           savedAt: Date.now(),
         });
         button.textContent = "Opened tab";
@@ -1329,7 +1394,12 @@
       }
 
       const modalHelper = injectConnectModalHelper(dialog);
-      const filled = await fillConnectModalNote(dialog, modalHelper);
+      const filled = await fillConnectModalNote(dialog, modalHelper, {
+        name: activeRecipientName,
+        profileUrl,
+        connectionMessage: context.connectionMessage,
+        savedAt: Date.now(),
+      });
       button.textContent = filled ? "Note filled" : "Modal ready";
     } catch (error) {
       cnFail(error?.message || String(error), { scope: "row", kind });
@@ -1483,11 +1553,14 @@
       const actions = Array.from(
         document.querySelectorAll(`[role='menuitem'], ${ACTION_SELECTOR}`),
       );
+      const targetFirstName = activeConnectTargetFirstName();
       const match = actions.find(
         (action) =>
           isVisible(action) &&
           !action.classList.contains(ROW_HELPER_CLASS) &&
           !action.classList.contains(ROW_BUTTON_CLASS) &&
+          !isInExcludedProfileRegion(action) &&
+          !connectCandidateNameMismatch(action, targetFirstName) &&
           pattern.test(buttonLabel(action)),
       );
       if (match) return match;
@@ -1504,11 +1577,14 @@
       const actions = Array.from(
         document.querySelectorAll(`[role='menuitem'], ${ACTION_SELECTOR}`),
       );
+      const targetFirstName = activeConnectTargetFirstName();
       const match = actions.find(
         (action) =>
           isVisible(action) &&
           !action.classList.contains(ROW_HELPER_CLASS) &&
           !action.classList.contains(ROW_BUTTON_CLASS) &&
+          !isInExcludedProfileRegion(action) &&
+          !connectCandidateNameMismatch(action, targetFirstName) &&
           isNativeConnectAction(action),
       );
       if (match) return match;
@@ -1589,7 +1665,7 @@
     return dialogs.find((dialog) => {
       if (!isVisible(dialog)) return false;
       const text = cleanText(dialog.innerText || dialog.textContent || "");
-      if (/\b(add a note|add note|include a note|send invitation|invitation|personalize invite|personalize invitation|customize invitation|connect with)\b/i.test(text)) {
+      if (/\b(add a note|add note|add a note to your invitation|include a note|send without a note|send invitation|send now|invitation|personalize your invitation|personalize invite|personalize invitation|customize invitation|connect with)\b/i.test(text)) {
         return true;
       }
       if (findVisibleNoteTextarea(dialog)) return true;
@@ -1600,6 +1676,11 @@
 
   function extractPersonNameFromDialog(dialog) {
     const text = cleanText(dialog.innerText || dialog.textContent || "");
+    const personalizeMatch = text.match(
+      /personalize your invitation to\s+(.+?)\s+by adding a note/i,
+    );
+    if (personalizeMatch?.[1]) return cleanPersonName(personalizeMatch[1]);
+
     const match = text.match(/\b(?:invite|invitation to|connect with)\s+([^,.\n]+?)(?:\s+to\b|$)/i);
     return cleanPersonName(match?.[1] || "");
   }
@@ -1646,6 +1727,7 @@
         JSON.stringify({
           name: String(intent.name || "").slice(0, 120),
           profileUrl: canonicalProfileUrlFromHref(intent.profileUrl || ""),
+          connectionMessage: String(intent.connectionMessage || "").slice(0, 1200),
           savedAt: Number(intent.savedAt || Date.now()),
         }),
       );
@@ -1727,7 +1809,7 @@
 
   function cleanPersonName(value) {
     return cleanText(value)
-      .replace(/\b(?:view|open)\s+.+?\s+profile\b/gi, "")
+      .replace(/\b(?:view|open)\s+(.+?)(?:['’]s)?\s+profile\b/gi, "$1")
       .replace(/\b(?:1st|2nd|3rd\+?|3rd)\b/gi, "")
       .replace(/\b(?:connect|message|follow|more)\b/gi, "")
       .replace(/[•·|].*$/g, "")
@@ -1736,7 +1818,7 @@
       .trim();
   }
 
-  async function fillConnectModalNote(dialog, helper) {
+  async function fillConnectModalNote(dialog, helper, intent = null) {
     if (!helper) return false;
 
     const originalText = helper.textContent;
@@ -1749,12 +1831,26 @@
       }
 
       const context = await activeOutreachContext();
+      const noteIntent = intent || readConnectIntent();
+      const rawNote =
+        noteIntent?.connectionMessage ||
+        context?.connectionMessage ||
+        "";
+      const recipientName =
+        noteIntent?.name ||
+        activeRecipientName ||
+        extractPersonNameFromDialog(dialog);
+      cnLog("raw note before personalization", {
+        chars: rawNote.length,
+        hasIntentNote: Boolean(noteIntent?.connectionMessage),
+      });
       const note = personalizeConnectionNote(
-        context?.connectionMessage || "",
-        recentActiveRecipientName() || extractPersonNameFromDialog(dialog),
+        rawNote,
+        recipientName,
       )
         .trim()
         .slice(0, 300);
+      cnLog("personalized note", { note, recipientName });
       if (!note) throw new Error("Missing outreach note.");
 
       let field = findVisibleNoteTextarea(dialog);
@@ -1766,7 +1862,7 @@
           clickElement(addNoteButton);
           cnLog("add note clicked", describeActionElement(addNoteButton));
         }
-        field = await waitForNoteTextField(dialog, 3000);
+        field = await waitForNoteTextField(dialog, 5000);
       }
       if (!field) {
         // Retry once: occasionally the first "Add a note" click is swallowed
@@ -1780,7 +1876,7 @@
         field = await waitForNoteTextField(dialog, 2000);
       }
 
-      if (!field) throw new Error("No note field.");
+      if (!field) throw new Error("No note field after clicking Add a note.");
 
       cnLog("textarea found", describeActionElement(field));
       fillTextField(field, note);
@@ -1805,7 +1901,25 @@
   }
 
   function findAddNoteButton(dialog) {
-    return findButtonByText(dialog, /\b(add\s+(?:a\s+)?note|add note|include\s+(?:a\s+)?note|personalize(?:\s+invite|\s+invitation)?|customize(?:\s+invite|\s+invitation)?)\b/i);
+    const buttons = actionElements(dialog).filter((button) => {
+      if (!isVisible(button)) return false;
+      if (button.classList.contains(ROW_HELPER_CLASS)) return false;
+      if (button.classList.contains(ROW_BUTTON_CLASS)) return false;
+      return true;
+    });
+
+    const exact = buttons.find((button) => {
+      const text = cleanText(button.innerText || button.textContent || "");
+      return /^add a note$/i.test(text);
+    });
+    if (exact) return exact;
+
+    return buttons.find((button) => {
+      const label = buttonLabel(button);
+      if (/\bsend\s+without\b/i.test(label)) return false;
+      if (/\bsend\s+(invitation|now)?\b/i.test(label)) return false;
+      return /\b(add\s+(?:a\s+)?note|add note|include\s+(?:a\s+)?note|personalize(?:\s+invite|\s+invitation)?|customize(?:\s+invite|\s+invitation)?)\b/i.test(label);
+    }) || null;
   }
 
   function findNoteTextField(dialog) {
@@ -1818,7 +1932,7 @@
     if (!dialog) return null;
     const fields = Array.from(
       dialog.querySelectorAll(
-        "textarea[name='message'], textarea#custom-message, textarea, [contenteditable='true']",
+        "textarea[name='message'], textarea#custom-message, textarea, [contenteditable='true'], input[aria-label], input[placeholder]",
       ),
     );
     return (
@@ -1826,10 +1940,20 @@
         if (!isVisible(field)) return false;
         const rect = field.getBoundingClientRect();
         const tag = String(field.tagName || "").toLowerCase();
-        if (tag === "textarea") return rect.height >= 20 && rect.width >= 120;
+        const fieldLabel = cleanText(
+          [
+            field.getAttribute?.("name") || "",
+            field.getAttribute?.("id") || "",
+            field.getAttribute?.("aria-label") || "",
+            field.getAttribute?.("placeholder") || "",
+          ].join(" "),
+        );
+        const looksLikeNote = /\b(message|note|invitation|invite)\b/i.test(fieldLabel);
+        if (tag === "textarea") return rect.height >= 12 && rect.width >= 80;
         if (field.getAttribute?.("contenteditable") === "true") {
-          return rect.height >= 20 && rect.width >= 120;
+          return looksLikeNote || (rect.height >= 20 && rect.width >= 120);
         }
+        if (tag === "input") return looksLikeNote && rect.width >= 80;
         return false;
       }) || null
     );
@@ -1839,8 +1963,26 @@
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
-      const field = findVisibleNoteTextarea(dialog);
-      if (field) return field;
+      // First try the original dialog reference — covers the common case
+      // where the textarea mounts inside the same modal.
+      const direct = findVisibleNoteTextarea(dialog);
+      if (direct) return direct;
+
+      // LinkedIn's "Add a note to your invitation?" choice modal (buttons
+      // "Send without a note" / "Add a note") is a DIFFERENT dialog from
+      // the textarea modal it spawns. After clicking "Add a note", the
+      // textarea lives in a freshly-mounted sibling dialog — the original
+      // `dialog` reference may still exist but never gains the textarea.
+      // Sweep every live dialog/modal and return the first hit.
+      const liveDialogs = Array.from(
+        document.querySelectorAll("[role='dialog'], .artdeco-modal"),
+      );
+      for (const candidate of liveDialogs) {
+        if (candidate === dialog) continue;
+        const field = findVisibleNoteTextarea(candidate);
+        if (field) return field;
+      }
+
       await sleep(100);
     }
 
@@ -2100,13 +2242,20 @@
     const record = {
       name: String(intent.name || "").slice(0, 120),
       profileUrl: canonicalProfileUrlFromHref(intent.profileUrl || "") || String(intent.profileUrl || ""),
+      connectionMessage: String(intent.connectionMessage || "").slice(0, 1200),
       savedAt: Number(intent.savedAt || Date.now()),
     };
     map[slug] = record;
     await storageSet({ [PENDING_INTENTS_KEY]: map });
     cnLog("intent saved", { slug, profileUrl: record.profileUrl, name: record.name });
+    cnLog("note saved to pending intent", { slug, chars: record.connectionMessage.length });
     // Also keep the legacy sessionStorage intent — used by updateProfileConnectStatus.
-    rememberConnectIntent({ name: map[slug].name, profileUrl: map[slug].profileUrl, savedAt: map[slug].savedAt });
+    rememberConnectIntent({
+      name: map[slug].name,
+      profileUrl: map[slug].profileUrl,
+      connectionMessage: map[slug].connectionMessage,
+      savedAt: map[slug].savedAt,
+    });
   }
 
   async function consumePendingIntent(slug) {
@@ -3542,6 +3691,7 @@
         findNativeConnectAction,
         findVisibleNoteTextarea,
         findAddNoteButton,
+        extractPersonNameFromDialog,
         checkWeeklyLimitModal,
         personalizeConnectionNote,
         todayKey,

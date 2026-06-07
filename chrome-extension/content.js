@@ -418,6 +418,10 @@
     const text = cleanText(line);
     if (!text || text.length > 90) return false;
     if (rawTitle && cleanText(rawTitle) === text) return false;
+    // JD expander affordances must never be accepted as a company name.
+    if (/^(show|see)\s+(more|less)$/i.test(text)) return false;
+    if (/\b(show|see)\s+more\b/i.test(text)) return false;
+    if (/[…]\s*more$/i.test(text) || /\.\.\.\s*more$/i.test(text)) return false;
     if (isLikelyJobTitle(text) || locationFromLine(text) || isNoiseLine(text)) return false;
     if (/\b(employees?|connections?|applicants?|benefits?|premium|open to full-time roles|viewed|easy apply)\b/i.test(text)) {
       return false;
@@ -828,9 +832,18 @@
   }
 
   function isNoiseLine(line) {
-    return /^(apply|easy apply|saved|save|remote|hybrid|on-site|onsite|full-time|part-time|contract|internship|yes|no|premium|about the job|people you can reach out to|job match|show match details|tailor my resume|create cover letter)$/i.test(
-      cleanText(line),
-    );
+    const text = cleanText(line);
+    if (
+      /^(apply|easy apply|saved|save|remote|hybrid|on-site|onsite|full-time|part-time|contract|internship|yes|no|premium|about the job|people you can reach out to|job match|show match details|tailor my resume|create cover letter|show more|see more|show less|see less)$/i.test(
+        text,
+      )
+    ) {
+      return true;
+    }
+    // JD expander affordances ("…show more", "...more").
+    if (/\b(show|see)\s+more\b/i.test(text)) return true;
+    if (/[…]\s*more$/i.test(text) || /\.\.\.\s*more$/i.test(text)) return true;
+    return false;
   }
 
   function cleanJobTitle(title) {
