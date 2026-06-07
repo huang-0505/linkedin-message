@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.5.7";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V23__";
+  const EXTENSION_VERSION = "0.5.8";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V24__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -1024,15 +1024,25 @@
   async function clickProfileConnectAction(timeoutMs) {
     const startedAt = Date.now();
     let lastMoreAttemptAt = 0;
+    let lastDirectAttemptAt = 0;
 
     while (Date.now() - startedAt < timeoutMs) {
       const directConnect = findProfileConnectButton();
-      if (directConnect) {
+      if (directConnect && Date.now() - lastDirectAttemptAt > 1800) {
+        lastDirectAttemptAt = Date.now();
         cnLog("connect button found", describeActionElement(directConnect));
         setAutoConnectStatus("Connect + Note: opening invite modal...");
         clickElement(directConnect);
-        cnLog("connect clicked", describeActionElement(directConnect));
-        return true;
+        // VERIFY the click actually opened the invite dialog. Without this
+        // we'd declare success on a false-positive click (company link, etc.)
+        // and the auto-flow would dead-end with no dialog open.
+        const confirmedDirect = await waitForDialogAfterClick(1500);
+        if (confirmedDirect) {
+          cnLog("connect clicked", describeActionElement(directConnect));
+          return true;
+        }
+        cnLog("direct connect click did not open dialog", describeActionElement(directConnect));
+        // Fall through to the More-menu path on the next iteration.
       }
 
       const moreButton = findProfileMoreButton();
@@ -1046,8 +1056,13 @@
           cnLog("connect button found", describeActionElement(menuConnect));
           setAutoConnectStatus("Connect + Note: opening invite modal...");
           clickElement(menuConnect);
-          cnLog("connect clicked", describeActionElement(menuConnect));
-          return true;
+          const confirmedMenu = await waitForDialogAfterClick(1500);
+          if (confirmedMenu) {
+            cnLog("connect clicked", describeActionElement(menuConnect));
+            return true;
+          }
+          cnLog("menu connect click did not open dialog", describeActionElement(menuConnect));
+          // Keep looping — maybe the menu re-renders or a different overflow exists.
         }
       }
 
@@ -1055,6 +1070,16 @@
     }
 
     return false;
+  }
+
+  async function waitForDialogAfterClick(timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const dialog = findConnectDialog();
+      if (dialog) return dialog;
+      await sleep(120);
+    }
+    return null;
   }
 
   function findProfileConnectButton() {
@@ -1069,6 +1094,19 @@
       // region filter as a belt-and-braces guard in case LinkedIn ever moves
       // recommendation cards inside <main>.
       if (isInExcludedProfileRegion(el)) return false;
+      // Reject anchor links pointing to company or school pages — these are
+      // the company logo / current employer / school links that sit beside
+      // the Connect button and have no "connect" semantics.
+      const tag = String(el.tagName || "").toLowerCase();
+      if (tag === "a") {
+        const href = el.getAttribute?.("href") || "";
+        if (/\/company\/|\/school\//i.test(href)) return false;
+      }
+      // Also reject elements that WRAP a company/school link (e.g. a
+      // role=button wrapper around the company logo).
+      try {
+        if (el.querySelector && el.querySelector("a[href*='/company/'], a[href*='/school/']")) return false;
+      } catch (_) {}
       return true;
     });
 
@@ -1128,29 +1166,12 @@
     });
     if (starts) return starts;
 
-    // Pass 4: ANY visible top-card button with "connect" in combined label,
-    // excluding disqualifying words.
-    const loose = candidates.find((el) => {
-      const label = buttonLabel(el).toLowerCase();
-      if (!/\bconnect\b/.test(label)) return false;
-      if (/\b(connected|connections?|follow|message|more|see all|remove connection|withdraw|pending|view profile|cancel|next|skip|edit|done)\b/.test(label)) return false;
-      if (connectCandidateNameMismatch(el, targetFirstName)) return false;
-      return true;
-    });
-    if (loose) return loose;
-
-    // Pass 5: last-ditch — any top-card button whose icon SVG has aria-label
-    // or title containing "connect" (LinkedIn sometimes uses an icon-only
-    // button).
-    const iconOnly = candidates.find((el) => {
-      const svg = el.querySelector?.("svg, use");
-      if (!svg) return false;
-      const svgAria = (svg.getAttribute?.("aria-label") || svg.getAttribute?.("title") || "").toLowerCase();
-      if (!/\bconnect\b/.test(svgAria) || /\b(connected|connection)\b/.test(svgAria)) return false;
-      if (connectCandidateNameMismatch(el, targetFirstName)) return false;
-      return true;
-    });
-    return iconOnly || null;
+    // Intentionally NO loose-label pass and NO icon-only SVG fallback —
+    // both were sources of false positives (company logo, headline links).
+    // On 3rd-degree profiles where Connect lives only in the More menu,
+    // this returns null and clickProfileConnectAction proceeds to the
+    // More menu fallback.
+    return null;
   }
 
   async function waitForProfileMoreButton(timeoutMs) {
@@ -1171,7 +1192,11 @@
     return candidates.find((el) => {
       const label = profileActionLabel(el).toLowerCase();
       const text = cleanText(el.innerText || el.textContent || "");
+      const ariaRaw = (el.getAttribute && el.getAttribute("aria-label") || "").trim();
+      // Most LinkedIn overflow buttons have aria-label EXACTLY "More" with no
+      // visible text. That must match.
       if (/^more$/i.test(text)) return true;
+      if (/^more$/i.test(ariaRaw)) return true;
       if (/\bmore\b/.test(label) && /\b(action|option|menu|overflow|more)\b/.test(label)) return true;
       if (/\b(open|show)\b.*\b(action|option|menu|more)\b/.test(label)) return true;
       if (/\boverflow\b/.test(label)) return true;
