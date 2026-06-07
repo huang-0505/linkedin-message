@@ -6,8 +6,8 @@
 // or click final Send.
 
 (() => {
-  const EXTENSION_VERSION = "0.5.5";
-  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V21__";
+  const EXTENSION_VERSION = "0.5.6";
+  const REFRESH_KEY = "__LRA_PAGE_ACTION_REFRESH_V22__";
   const BUTTON_ID = "lra-page-action-button";
   const WRAP_ID = "lra-page-action-wrap";
   const STYLE_ID = "lra-page-action-style";
@@ -1610,6 +1610,16 @@
       await sleep(120);
     }
 
+    if (!window.__lraDialogDumped) {
+      window.__lraDialogDumped = true;
+      try {
+        const cand = Array.from(document.querySelectorAll("[role], .artdeco-modal, [class*='modal'], [class*='dialog']"))
+          .filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+          .slice(0, 30)
+          .map((e) => ({ role: e.getAttribute("role") || "", cls: (e.className || "").toString().slice(0, 60), txt: (e.innerText || "").replace(/\s+/g, " ").slice(0, 70) }));
+        console.info("[Connect+Note] dialog dump:", cand);
+      } catch (_) {}
+    }
     return null;
   }
 
@@ -1658,20 +1668,29 @@
   }
 
   function findConnectDialog() {
-    const dialogs = Array.from(
-      document.querySelectorAll("[role='dialog'], .artdeco-modal"),
-    );
-
-    return dialogs.find((dialog) => {
-      if (!isVisible(dialog)) return false;
-      const text = cleanText(dialog.innerText || dialog.textContent || "");
-      if (/\b(add a note|add note|add a note to your invitation|include a note|send without a note|send invitation|send now|invitation|personalize your invitation|personalize invite|personalize invitation|customize invitation|connect with)\b/i.test(text)) {
-        return true;
-      }
-      if (findVisibleNoteTextarea(dialog)) return true;
-      if (findAddNoteButton(dialog)) return true;
+    const WRAP = "[role='dialog'], [role='alertdialog'], [aria-modal='true'], .artdeco-modal, [data-test-modal]";
+    const dialogs = Array.from(document.querySelectorAll(WRAP));
+    // Gate on a VISIBLE control inside (not the wrapper's own rect — LinkedIn
+    // sometimes wraps the modal in a display:contents/0x0 element). The choice
+    // dialog has a visible "Add a note"/"Send without a note" button; the note
+    // dialog has a visible textarea.
+    const match = dialogs.find((d) => {
+      if (findVisibleNoteTextarea(d)) return true;
+      if (findAddNoteButton(d)) return true;
+      if (findButtonByText(d, /send without a note/i)) return true;
       return false;
     });
+    if (match) return match;
+    // Last-ditch: controls exist but under an unrecognized wrapper. Find them
+    // anywhere and climb to the nearest container. These labels are unique to
+    // the invite flow, so no false match against the rest of the page.
+    const anchor =
+      findVisibleNoteTextarea(document) ||
+      findButtonByText(document, /\b(add\s+(?:a\s+)?note|send without a note)\b/i);
+    if (anchor) {
+      return (anchor.closest && (anchor.closest(WRAP) || anchor.closest("[aria-labelledby], section, div"))) || document.body;
+    }
+    return null;
   }
 
   function extractPersonNameFromDialog(dialog) {
